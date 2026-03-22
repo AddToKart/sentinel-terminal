@@ -7,7 +7,7 @@ import path from 'node:path'
 import { dialog } from 'electron'
 import * as nodePty from 'node-pty'
 import type { IPty } from 'node-pty'
-import pidusage from 'pidusage'
+import pidusage, { clear as clearPidusage } from 'pidusage'
 
 import type {
   ActivityLogEntry,
@@ -16,13 +16,17 @@ import type {
   ProcessMetrics,
   ProjectNode,
   ProjectState,
+  SessionCommandEntry,
+  SessionDiffUpdate,
+  SessionHistoryUpdate,
+  SessionMetricsUpdate,
   SessionSummary,
   WorkspaceSummary
 } from '@shared/types'
 
 const TREE_DEPTH = 3
 const TREE_ENTRY_LIMIT = 28
-const METRIC_INTERVAL_MS = 2500
+const METRIC_INTERVAL_MS = 1000
 const RUN_COMMAND_TIMEOUT_MS = 30_000
 const CLOSE_TIMEOUT_MS = 4_000
 
@@ -64,16 +68,20 @@ interface SessionRecord {
   terminal: IPty
   closePromise: Promise<void>
   resolveClosed: () => void
-  lastCpuSeconds?: number
-  lastCpuAt?: number
   closeRequested: boolean
   finalized: boolean
+  commandBuffer: string
+  history: SessionCommandEntry[]
+  modifiedPaths: string[]
   finalizePromise?: Promise<void>
 }
 
 type ManagerEvents = {
   'session-output': [{ sessionId: string; data: string }]
   'session-state': [SessionSummary]
+  'session-metrics': [SessionMetricsUpdate]
+  'session-history': [SessionHistoryUpdate]
+  'session-diff': [SessionDiffUpdate]
   'workspace-state': [WorkspaceSummary]
   'activity-log': [ActivityLogEntry]
 }
@@ -155,10 +163,6 @@ async function runCommand(file: string, args: string[], cwd?: string): Promise<s
   })
 }
 
-async function runGit(cwd: string, args: string[]): Promise<string> {
-  return runCommand('git', ['-C', cwd, ...args], cwd)
-}
-
 async function runPowerShell(script: string): Promise<string> {
   return runCommand(
     'powershell.exe',
@@ -227,12 +231,70 @@ async function buildProjectTree(rootPath: string, depth = TREE_DEPTH): Promise<P
   return nodes
 }
 
+function normalizeSessionPaths(projectRoot: string, relativePaths: string[]): string[] {
+  return [...new Set(
+    relativePaths
+      .map((relativePath) => relativePath.trim())
+      .filter(Boolean)
+      .map((relativePath) => path.normalize(path.resolve(projectRoot, relativePath)))
+  )].sort((left, right) => left.localeCompare(right))
+}
+
+function arrayEquals(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false
+  }
+
+  return left.every((value, index) => value === right[index])
+}
+
+function createHistoryEntry(command: string, source: SessionCommandEntry['source']): SessionCommandEntry {
+  return {
+    id: `${createTimestamp()}-${createToken()}`,
+    command,
+    timestamp: Date.now(),
+    source
+  }
+}
+
+function parseGitStatusOutput(raw: string): string[] {
+  const entries = raw.split('\0').filter(Boolean)
+  const modifiedPaths: string[] = []
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]
+    if (entry.length < 4) {
+      continue
+    }
+
+    const status = entry.slice(0, 2)
+    const primaryPath = entry.slice(3).trim()
+
+    if (!primaryPath) {
+      continue
+    }
+
+    if (status.includes('R') || status.includes('C')) {
+      const renamedPath = entries[index + 1]?.trim()
+      if (renamedPath) {
+        modifiedPaths.push(renamedPath)
+        index += 1
+        continue
+      }
+    }
+
+    modifiedPaths.push(primaryPath)
+  }
+
+  return [...new Set(modifiedPaths)]
+}
+
 export class SessionManager extends EventEmitter {
   private readonly sessionRecords = new Map<string, SessionRecord>()
   private readonly pidRegistry = new Map<string, Set<number>>()
-  private readonly cpuCount = Math.max(os.cpus().length, 1)
   private readonly metricsTimer: NodeJS.Timeout
   private readonly activityLog: ActivityLogEntry[] = []
+  private refreshInFlight = false
   private projectState: ProjectState = createEmptyProject()
   private workspaceSummary: WorkspaceSummary = {
     activeSessions: 0,
@@ -245,7 +307,7 @@ export class SessionManager extends EventEmitter {
   constructor() {
     super()
     this.metricsTimer = setInterval(() => {
-      void this.refreshMetrics().catch(() => undefined)
+      this.scheduleRuntimeRefresh()
     }, METRIC_INTERVAL_MS)
   }
 
@@ -257,12 +319,29 @@ export class SessionManager extends EventEmitter {
     return super.emit(eventName, ...args)
   }
 
+  private scheduleRuntimeRefresh(): void {
+    if (this.refreshInFlight) {
+      return
+    }
+
+    this.refreshInFlight = true
+
+    void this.refreshRuntimeState()
+      .catch(() => undefined)
+      .finally(() => {
+        this.refreshInFlight = false
+      })
+  }
+
   async bootstrap(): Promise<BootstrapPayload> {
     return {
       project: structuredClone(this.projectState),
       sessions: this.listSessions(),
       summary: structuredClone(this.workspaceSummary),
-      activityLog: structuredClone(this.activityLog)
+      activityLog: structuredClone(this.activityLog),
+      metrics: this.listSessionMetrics(),
+      histories: this.listSessionHistories(),
+      diffs: this.listSessionDiffs()
     }
   }
 
@@ -373,7 +452,10 @@ export class SessionManager extends EventEmitter {
       closePromise,
       resolveClosed,
       closeRequested: false,
-      finalized: false
+      finalized: false,
+      commandBuffer: '',
+      history: [],
+      modifiedPaths: []
     }
 
     this.sessionRecords.set(sessionId, record)
@@ -382,6 +464,9 @@ export class SessionManager extends EventEmitter {
       new Set(typeof terminal.pid === 'number' ? [terminal.pid] : [])
     )
     this.emit('session-state', structuredClone(summary))
+    this.emitSessionMetrics(record, this.getTrackedPids(sessionId), Date.now())
+    this.emitSessionHistory(record)
+    this.emitSessionDiff(record)
     this.emitWorkspaceState()
 
     terminal.onData((data) => {
@@ -399,8 +484,11 @@ export class SessionManager extends EventEmitter {
     })
 
     if (input.startupCommand?.trim()) {
+      this.appendHistoryEntry(record, input.startupCommand.trim(), 'startup')
       terminal.write(`${input.startupCommand}\r`)
     }
+
+    this.scheduleRuntimeRefresh()
 
     return structuredClone(summary)
   }
@@ -411,6 +499,7 @@ export class SessionManager extends EventEmitter {
       return
     }
 
+    this.trackCommandInput(record, data)
     record.terminal.write(data)
   }
 
@@ -435,6 +524,8 @@ export class SessionManager extends EventEmitter {
       if (record.summary.status === 'starting' || record.summary.status === 'ready' || record.summary.status === 'error') {
         record.summary.status = 'closing'
         record.summary.error = undefined
+        record.modifiedPaths = []
+        this.emitSessionDiff(record)
         this.emit('session-state', structuredClone(record.summary))
         this.emitWorkspaceState()
       }
@@ -464,6 +555,7 @@ export class SessionManager extends EventEmitter {
 
   dispose(): void {
     clearInterval(this.metricsTimer)
+    clearPidusage()
 
     for (const record of this.sessionRecords.values()) {
       record.closeRequested = true
@@ -481,6 +573,106 @@ export class SessionManager extends EventEmitter {
     return [...this.sessionRecords.values()]
       .map((record) => structuredClone(record.summary))
       .sort((left, right) => right.createdAt - left.createdAt)
+  }
+
+  private listSessionMetrics(): SessionMetricsUpdate[] {
+    return [...this.sessionRecords.values()]
+      .map((record) =>
+        structuredClone({
+          sessionId: record.summary.id,
+          pid: record.summary.pid,
+          processIds: this.getTrackedPids(record.summary.id),
+          metrics: record.summary.metrics,
+          sampledAt: this.workspaceSummary.lastUpdated
+        })
+      )
+      .sort((left, right) => left.sessionId.localeCompare(right.sessionId))
+  }
+
+  private listSessionHistories(): SessionHistoryUpdate[] {
+    return [...this.sessionRecords.values()]
+      .map((record) =>
+        structuredClone({
+          sessionId: record.summary.id,
+          entries: record.history
+        })
+      )
+      .sort((left, right) => left.sessionId.localeCompare(right.sessionId))
+  }
+
+  private listSessionDiffs(): SessionDiffUpdate[] {
+    return [...this.sessionRecords.values()]
+      .map((record) =>
+        structuredClone({
+          sessionId: record.summary.id,
+          modifiedPaths: record.modifiedPaths,
+          updatedAt: record.summary.createdAt
+        })
+      )
+      .sort((left, right) => left.sessionId.localeCompare(right.sessionId))
+  }
+
+  private emitSessionMetrics(record: SessionRecord, processIds: number[], sampledAt: number): void {
+    this.emit('session-metrics', {
+      sessionId: record.summary.id,
+      pid: record.summary.pid,
+      processIds,
+      metrics: structuredClone(record.summary.metrics),
+      sampledAt
+    })
+  }
+
+  private emitSessionHistory(record: SessionRecord): void {
+    this.emit('session-history', {
+      sessionId: record.summary.id,
+      entries: structuredClone(record.history)
+    })
+  }
+
+  private emitSessionDiff(record: SessionRecord): void {
+    this.emit('session-diff', {
+      sessionId: record.summary.id,
+      modifiedPaths: structuredClone(record.modifiedPaths),
+      updatedAt: Date.now()
+    })
+  }
+
+  private appendHistoryEntry(
+    record: SessionRecord,
+    command: string,
+    source: SessionCommandEntry['source']
+  ): void {
+    const normalizedCommand = command.trim()
+    if (!normalizedCommand) {
+      return
+    }
+
+    record.history = [createHistoryEntry(normalizedCommand, source), ...record.history].slice(0, 250)
+    this.emitSessionHistory(record)
+  }
+
+  private trackCommandInput(record: SessionRecord, data: string): void {
+    for (const character of data) {
+      if (character === '\r' || character === '\n') {
+        this.appendHistoryEntry(record, record.commandBuffer, 'interactive')
+        record.commandBuffer = ''
+        continue
+      }
+
+      if (character === '\u0003' || character === '\u0015') {
+        record.commandBuffer = ''
+        continue
+      }
+
+      if (character === '\u0008' || character === '\u007f') {
+        record.commandBuffer = record.commandBuffer.slice(0, -1)
+        continue
+      }
+
+      if (character >= ' ' || character === '\t') {
+        record.commandBuffer += character
+      }
+    }
   }
 
   private pushActivityLog(entry: Omit<ActivityLogEntry, 'id' | 'timestamp'>): void {
@@ -579,6 +771,10 @@ export class SessionManager extends EventEmitter {
         record.summary.error = undefined
       }
 
+      record.commandBuffer = ''
+      record.modifiedPaths = []
+      this.emitSessionMetrics(record, [], Date.now())
+      this.emitSessionDiff(record)
       await this.cleanupWorktree(record.summary)
       record.finalized = true
       this.emit('session-state', structuredClone(record.summary))
@@ -713,7 +909,7 @@ export class SessionManager extends EventEmitter {
     this.pidRegistry.set(sessionId, new Set())
   }
 
-  private async refreshMetrics(): Promise<void> {
+  private async refreshRuntimeState(): Promise<void> {
     const activeRecords = [...this.sessionRecords.values()].filter(
       (record) => record.summary.status === 'starting' || record.summary.status === 'ready' || record.summary.status === 'closing'
     )
@@ -727,56 +923,90 @@ export class SessionManager extends EventEmitter {
       .map((record) => record.summary.pid)
       .filter((pid): pid is number => typeof pid === 'number')
 
-    if (rootIds.length === 0) {
-      this.emitWorkspaceState()
-      return
-    }
-
-    const snapshotMap = await this.collectProcessTreeSnapshots(rootIds)
-    const usageMap = await this.collectPidUsage(
-      [...snapshotMap.values()].flatMap((snapshot) => snapshot.processIds)
-    )
+    const [snapshotMap, diffMap] = await Promise.all([
+      rootIds.length > 0 ? this.collectProcessTreeSnapshots(rootIds) : Promise.resolve(new Map<number, ProcessTreeSnapshot>()),
+      this.collectWorktreeDiffs(
+        activeRecords.filter(
+          (record) => record.summary.status === 'starting' || record.summary.status === 'ready'
+        )
+      )
+    ])
+    const usageMap =
+      snapshotMap.size > 0
+        ? await this.collectPidUsage([...snapshotMap.values()].flatMap((snapshot) => snapshot.processIds))
+        : new Map<number, { cpu: number; memory: number }>()
+    const sampledAt = Date.now()
 
     for (const record of activeRecords) {
       const pid = record.summary.pid
-      if (!pid) {
-        continue
+      const snapshot = typeof pid === 'number' ? snapshotMap.get(pid) : undefined
+      const processIds = snapshot?.processIds ?? []
+      this.updateTrackedPids(record.summary.id, processIds)
+
+      record.summary.metrics = snapshot
+        ? (() => {
+            const aggregateUsage = snapshot.processIds.reduce(
+              (totals, processId) => {
+                const usage = usageMap.get(processId)
+                if (!usage) {
+                  return totals
+                }
+
+                return {
+                  cpu: totals.cpu + usage.cpu,
+                  memory: totals.memory + usage.memory
+                }
+              },
+              { cpu: 0, memory: 0 }
+            )
+
+            return {
+              cpuPercent: round(aggregateUsage.cpu, 1),
+              memoryMb: round(aggregateUsage.memory / 1024 / 1024, 1),
+              handleCount: snapshot.handleCount,
+              threadCount: snapshot.threadCount,
+              processCount: snapshot.processCount
+            }
+          })()
+        : emptyMetrics()
+
+      this.emitSessionMetrics(record, processIds, sampledAt)
+
+      const nextModifiedPaths = diffMap.get(record.summary.id) ?? []
+      if (!arrayEquals(record.modifiedPaths, nextModifiedPaths)) {
+        record.modifiedPaths = nextModifiedPaths
+        this.emitSessionDiff(record)
       }
-
-      const snapshot = snapshotMap.get(pid)
-      if (!snapshot) {
-        this.updateTrackedPids(record.summary.id, [])
-        continue
-      }
-
-      this.updateTrackedPids(record.summary.id, snapshot.processIds)
-      const aggregateUsage = snapshot.processIds.reduce(
-        (totals, processId) => {
-          const usage = usageMap.get(processId)
-          if (!usage) {
-            return totals
-          }
-
-          return {
-            cpu: totals.cpu + usage.cpu,
-            memory: totals.memory + usage.memory
-          }
-        },
-        { cpu: 0, memory: 0 }
-      )
-
-      record.summary.metrics = {
-        cpuPercent: round(aggregateUsage.cpu, 1),
-        memoryMb: round(aggregateUsage.memory / 1024 / 1024, 1),
-        handleCount: snapshot.handleCount,
-        threadCount: snapshot.threadCount,
-        processCount: snapshot.processCount
-      }
-
-      this.emit('session-state', structuredClone(record.summary))
     }
 
     this.emitWorkspaceState()
+  }
+
+  private async collectWorktreeDiffs(records: SessionRecord[]): Promise<Map<string, string[]>> {
+    const updates = await Promise.all(
+      records.map(async (record) => {
+        if (!(await pathExists(record.summary.worktreePath))) {
+          return [record.summary.id, [] as string[]] as const
+        }
+
+        try {
+          const raw = await runCommand(
+            'git',
+            ['-C', record.summary.worktreePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
+            record.summary.worktreePath
+          )
+
+          return [
+            record.summary.id,
+            normalizeSessionPaths(record.summary.projectRoot, parseGitStatusOutput(raw))
+          ] as const
+        } catch {
+          return [record.summary.id, [] as string[]] as const
+        }
+      })
+    )
+
+    return new Map(updates)
   }
 
   private async collectPidUsage(

@@ -5,6 +5,9 @@ import type {
   BootstrapPayload,
   CreateSessionInput,
   ProjectState,
+  SessionDiffUpdate,
+  SessionHistoryUpdate,
+  SessionMetricsUpdate,
   SentinelApi,
   SessionOutputEvent,
   SessionSummary,
@@ -39,6 +42,12 @@ const api: SentinelApi = {
     subscribe<SessionOutputEvent>('sentinel:session-output', listener),
   onSessionState: (listener: (session: SessionSummary) => void) =>
     subscribe<SessionSummary>('sentinel:session-state', listener),
+  onSessionMetrics: (listener: (payload: SessionMetricsUpdate) => void) =>
+    subscribe<SessionMetricsUpdate>('sentinel:session-metrics', listener),
+  onSessionHistory: (listener: (payload: SessionHistoryUpdate) => void) =>
+    subscribe<SessionHistoryUpdate>('sentinel:session-history', listener),
+  onSessionDiff: (listener: (payload: SessionDiffUpdate) => void) =>
+    subscribe<SessionDiffUpdate>('sentinel:session-diff', listener),
   onWorkspaceState: (listener: (summary: WorkspaceSummary) => void) =>
     subscribe<WorkspaceSummary>('sentinel:workspace-state', listener),
   onActivityLog: (listener: (entry: ActivityLogEntry) => void) =>

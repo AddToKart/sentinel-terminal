@@ -1,9 +1,11 @@
-import { Clock3, Cpu, GitBranch, Layers3, MemoryStick } from 'lucide-react'
+import { Clock3, Cpu, GitBranch, Layers3, MemoryStick, TerminalSquare } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@shared/types'
 
 interface StatusBarProps {
   summary: WorkspaceSummary
+  consoleOpen: boolean
+  onToggleConsole: () => void
 }
 
 function formatTime(timestamp: number): string {
@@ -14,7 +16,7 @@ function formatTime(timestamp: number): string {
   })
 }
 
-export function StatusBar({ summary }: StatusBarProps): JSX.Element {
+export function StatusBar({ summary, consoleOpen, onToggleConsole }: StatusBarProps): JSX.Element {
   return (
     <footer className="border-t border-white/10 bg-sentinel-ink/75 px-6 py-3 backdrop-blur-xl">
       <div className="flex flex-wrap items-center justify-between gap-4 text-xs text-sentinel-mist">
@@ -38,6 +40,15 @@ export function StatusBar({ summary }: StatusBarProps): JSX.Element {
         </div>
 
         <div className="flex flex-wrap items-center gap-4">
+          <button
+            className="metric-row transition hover:border-sentinel-accent/40 hover:bg-sentinel-accent/10 hover:text-white"
+            onClick={onToggleConsole}
+            type="button"
+          >
+            <TerminalSquare className="h-3.5 w-3.5 text-sentinel-accent" />
+            <span>{consoleOpen ? 'Hide Console' : 'Show Console'}</span>
+            <span className="font-mono text-[11px] text-sentinel-mist">Ctrl+~</span>
+          </button>
           <div className="metric-row">
             <Layers3 className="h-3.5 w-3.5 text-white" />
             <span>{summary.totalProcesses} tracked processes</span>

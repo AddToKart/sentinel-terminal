@@ -91,6 +91,18 @@ app.whenReady().then(() => {
     sendToRenderer('sentinel:session-state', session)
   })
 
+  sessionManager.on('session-metrics', (payload) => {
+    sendToRenderer('sentinel:session-metrics', payload)
+  })
+
+  sessionManager.on('session-history', (payload) => {
+    sendToRenderer('sentinel:session-history', payload)
+  })
+
+  sessionManager.on('session-diff', (payload) => {
+    sendToRenderer('sentinel:session-diff', payload)
+  })
+
   sessionManager.on('workspace-state', (summary) => {
     sendToRenderer('sentinel:workspace-state', summary)
   })

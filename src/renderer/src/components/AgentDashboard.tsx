@@ -1,14 +1,17 @@
 import { Fragment } from 'react'
-import { GripVertical, GripHorizontal } from 'lucide-react'
+import { GripHorizontal, GripVertical } from 'lucide-react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 
-import type { SessionSummary } from '@shared/types'
+import type { SessionCommandEntry, SessionSummary } from '@shared/types'
 
 import { SessionTile } from './SessionTile'
 
 interface AgentDashboardProps {
   sessions: SessionSummary[]
+  histories: Record<string, SessionCommandEntry[]>
   onClose: (sessionId: string) => Promise<void>
+  onToggleMaximize: (sessionId: string) => void
+  maximizedSessionId: string | null
   fitNonce: number
 }
 
@@ -76,9 +79,43 @@ function DashboardResizeHandle({ direction }: { direction: 'horizontal' | 'verti
   )
 }
 
-export function AgentDashboard({ sessions, onClose, fitNonce }: AgentDashboardProps): JSX.Element {
-  const rows = buildRows(sessions)
-  const dashboardId = sessions.map((session) => session.id).join('-')
+export function AgentDashboard({
+  sessions,
+  histories,
+  onClose,
+  onToggleMaximize,
+  maximizedSessionId,
+  fitNonce
+}: AgentDashboardProps): JSX.Element {
+  const visibleSessions = maximizedSessionId
+    ? sessions.filter((session) => session.id === maximizedSessionId)
+    : sessions
+
+  if (visibleSessions.length === 0) {
+    return <div className="h-full min-h-0 min-w-0 overflow-hidden border border-white/10 bg-black/10" />
+  }
+
+  if (visibleSessions.length === 1 && maximizedSessionId) {
+    const session = visibleSessions[0]
+
+    return (
+      <div className="h-full min-h-0 min-w-0 overflow-hidden border border-white/10 bg-black/10 p-2">
+        <div className="h-full min-h-0 min-w-0 p-1.5">
+          <SessionTile
+            fitNonce={fitNonce}
+            historyEntries={histories[session.id] ?? []}
+            isMaximized
+            onClose={onClose}
+            onToggleMaximize={onToggleMaximize}
+            session={session}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  const rows = buildRows(visibleSessions)
+  const dashboardId = visibleSessions.map((session) => session.id).join('-')
 
   return (
     <div className="h-full min-h-0 min-w-0 overflow-hidden border border-white/10 bg-black/10 p-2">
@@ -114,7 +151,10 @@ export function AgentDashboard({ sessions, onClose, fitNonce }: AgentDashboardPr
                         <div className="h-full min-h-0 min-w-0 p-1.5">
                           <SessionTile
                             fitNonce={fitNonce}
+                            historyEntries={histories[session.id] ?? []}
+                            isMaximized={false}
                             onClose={onClose}
+                            onToggleMaximize={onToggleMaximize}
                             session={session}
                           />
                         </div>

@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from 'react'
+import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import {
   ArrowRight,
   FolderOpen,
@@ -10,15 +10,24 @@ import {
   TerminalSquare
 } from 'lucide-react'
 
-import type { ActivityLogEntry, ProjectState, SessionSummary, WorkspaceSummary } from '@shared/types'
+import type {
+  ActivityLogEntry,
+  ProjectState,
+  SessionCommandEntry,
+  SessionDiffUpdate,
+  SessionHistoryUpdate,
+  SessionMetricsUpdate,
+  SessionSummary,
+  WorkspaceSummary
+} from '@shared/types'
 
 const AgentDashboard = lazy(async () => {
   const module = await import('./components/AgentDashboard')
   return { default: module.AgentDashboard }
 })
 
+import { ConsoleDrawer } from './components/ConsoleDrawer'
 import { Sidebar } from './components/Sidebar'
-import { ActivityLog } from './components/ActivityLog'
 import { StatusBar } from './components/StatusBar'
 
 const emptyProject = (): ProjectState => ({
@@ -44,6 +53,18 @@ function upsertSession(current: SessionSummary[], incoming: SessionSummary): Ses
   return next.sort((left, right) => right.createdAt - left.createdAt)
 }
 
+function applyMetricsUpdate(current: SessionSummary[], incoming: SessionMetricsUpdate): SessionSummary[] {
+  return current.map((session) =>
+    session.id === incoming.sessionId
+      ? {
+          ...session,
+          pid: incoming.pid ?? session.pid,
+          metrics: incoming.metrics
+        }
+      : session
+  )
+}
+
 function projectSubtitle(project: ProjectState): string {
   if (!project.path) {
     return 'Open a Git repository to launch isolated agent worktrees.'
@@ -56,16 +77,63 @@ function projectSubtitle(project: ProjectState): string {
   return `${project.name} folder view. Worktree sessions require Git.`
 }
 
+function historyMapFromPayload(
+  payload: SessionHistoryUpdate[]
+): Record<string, SessionCommandEntry[]> {
+  return Object.fromEntries(payload.map((entry) => [entry.sessionId, entry.entries]))
+}
+
+function diffMapFromPayload(payload: SessionDiffUpdate[]): Record<string, string[]> {
+  return Object.fromEntries(payload.map((entry) => [entry.sessionId, entry.modifiedPaths]))
+}
+
+function pruneKeyedState<T>(current: Record<string, T>, validIds: Set<string>): Record<string, T> {
+  return Object.fromEntries(Object.entries(current).filter(([sessionId]) => validIds.has(sessionId)))
+}
+
+function buildDiffBadges(
+  sessions: SessionSummary[],
+  sessionDiffs: Record<string, string[]>
+): Record<string, string[]> {
+  const labelBySessionId = new Map(sessions.map((session) => [session.id, session.label.toUpperCase()]))
+  const next: Record<string, string[]> = {}
+
+  for (const [sessionId, modifiedPaths] of Object.entries(sessionDiffs)) {
+    const label = labelBySessionId.get(sessionId)
+    if (!label) {
+      continue
+    }
+
+    for (const filePath of modifiedPaths) {
+      next[filePath] = [...(next[filePath] ?? []), label]
+    }
+  }
+
+  for (const filePath of Object.keys(next)) {
+    next[filePath] = [...new Set(next[filePath])].sort((left, right) => left.localeCompare(right))
+  }
+
+  return next
+}
+
 export default function App(): JSX.Element {
   const [project, setProject] = useState<ProjectState>(emptyProject)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [summary, setSummary] = useState<WorkspaceSummary>(emptySummary)
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(emptyActivityLog)
+  const [sessionHistories, setSessionHistories] = useState<Record<string, SessionCommandEntry[]>>({})
+  const [sessionDiffs, setSessionDiffs] = useState<Record<string, string[]>>({})
   const [creatingSession, setCreatingSession] = useState(false)
   const [refreshingProject, setRefreshingProject] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [consoleOpen, setConsoleOpen] = useState(false)
   const [fitNonce, setFitNonce] = useState(0)
+  const [maximizedSessionId, setMaximizedSessionId] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const shellViewportRef = useRef<HTMLDivElement | null>(null)
+  const dashboardViewportRef = useRef<HTMLDivElement | null>(null)
+  const consoleDrawerRef = useRef<HTMLDivElement | null>(null)
+  const sessionIdSignature = sessions.map((session) => session.id).join('|')
 
   useEffect(() => {
     let disposed = false
@@ -78,9 +146,11 @@ export default function App(): JSX.Element {
         }
 
         setProject(payload.project)
-        setSessions(payload.sessions)
+        setSessions(payload.metrics.reduce(applyMetricsUpdate, payload.sessions))
         setSummary(payload.summary)
         setActivityLog(payload.activityLog)
+        setSessionHistories(historyMapFromPayload(payload.histories))
+        setSessionDiffs(diffMapFromPayload(payload.diffs))
       })
       .catch((error: unknown) => {
         if (disposed) {
@@ -94,35 +164,113 @@ export default function App(): JSX.Element {
       setSessions((current) => upsertSession(current, session))
     })
 
+    const removeMetricsListener = window.sentinel.onSessionMetrics((payload) => {
+      setSessions((current) => applyMetricsUpdate(current, payload))
+    })
+
+    const removeHistoryListener = window.sentinel.onSessionHistory((payload) => {
+      setSessionHistories((current) => ({
+        ...current,
+        [payload.sessionId]: payload.entries
+      }))
+    })
+
+    const removeDiffListener = window.sentinel.onSessionDiff((payload) => {
+      setSessionDiffs((current) => ({
+        ...current,
+        [payload.sessionId]: payload.modifiedPaths
+      }))
+    })
+
     const removeWorkspaceListener = window.sentinel.onWorkspaceState((workspaceState) => {
       setSummary(workspaceState)
     })
 
     const removeActivityListener = window.sentinel.onActivityLog((entry) => {
-      setActivityLog((current) => [entry, ...current].slice(0, 120))
+      setActivityLog((current) => [entry, ...current].slice(0, 160))
     })
 
     return () => {
       disposed = true
       removeSessionListener()
+      removeMetricsListener()
+      removeHistoryListener()
+      removeDiffListener()
       removeWorkspaceListener()
       removeActivityListener()
     }
   }, [])
 
   useEffect(() => {
-    const animationFrame = window.requestAnimationFrame(() => {
-      setFitNonce((current) => current + 1)
+    const validSessionIds = new Set(sessions.map((session) => session.id))
+
+    setSessionHistories((current) => pruneKeyedState(current, validSessionIds))
+    setSessionDiffs((current) => pruneKeyedState(current, validSessionIds))
+
+    if (maximizedSessionId && !validSessionIds.has(maximizedSessionId)) {
+      setMaximizedSessionId(null)
+    }
+  }, [sessionIdSignature, maximizedSessionId])
+
+  useEffect(() => {
+    const observedElements = [
+      shellViewportRef.current,
+      dashboardViewportRef.current,
+      consoleDrawerRef.current
+    ].filter((element): element is HTMLDivElement => Boolean(element))
+
+    if (observedElements.length === 0) {
+      return
+    }
+
+    let frameId = 0
+    const triggerFit = (): void => {
+      window.cancelAnimationFrame(frameId)
+      frameId = window.requestAnimationFrame(() => {
+        setFitNonce((current) => current + 1)
+      })
+    }
+
+    const observer = new ResizeObserver(() => {
+      triggerFit()
     })
-    const timeout = window.setTimeout(() => {
-      setFitNonce((current) => current + 1)
-    }, 320)
+
+    observedElements.forEach((element) => observer.observe(element))
+    triggerFit()
 
     return () => {
-      window.cancelAnimationFrame(animationFrame)
-      window.clearTimeout(timeout)
+      window.cancelAnimationFrame(frameId)
+      observer.disconnect()
     }
-  }, [sidebarCollapsed, sessions.length])
+  }, [])
+
+  useEffect(() => {
+    const timerIds = [0, 180, 320].map((delay) =>
+      window.setTimeout(() => {
+        setFitNonce((current) => current + 1)
+      }, delay)
+    )
+
+    return () => {
+      timerIds.forEach((timerId) => window.clearTimeout(timerId))
+    }
+  }, [sidebarCollapsed, consoleOpen, sessions.length, maximizedSessionId])
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (!event.ctrlKey || event.altKey || event.shiftKey || event.code !== 'Backquote') {
+        return
+      }
+
+      event.preventDefault()
+      setConsoleOpen((current) => !current)
+    }
+
+    window.addEventListener('keydown', handleKeyDown, { capture: true })
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, { capture: true })
+    }
+  }, [])
 
   async function handleOpenProject(): Promise<void> {
     setErrorMessage(null)
@@ -178,13 +326,23 @@ export default function App(): JSX.Element {
 
     try {
       await window.sentinel.closeSession(sessionId)
-      setSessions((current) => current.filter((session) => session.id !== sessionId))
+      setSessions((current) => {
+        const nextSessions = current.filter((session) => session.id !== sessionId)
+        const nextSessionIds = new Set(nextSessions.map((session) => session.id))
+        setSessionHistories((history) => pruneKeyedState(history, nextSessionIds))
+        setSessionDiffs((diffs) => pruneKeyedState(diffs, nextSessionIds))
+        return nextSessions
+      })
+      if (maximizedSessionId === sessionId) {
+        setMaximizedSessionId(null)
+      }
     } catch (error: unknown) {
       setErrorMessage(error instanceof Error ? error.message : 'Sentinel could not close the agent session.')
     }
   }
 
   const hasProject = Boolean(project.path)
+  const diffBadges = buildDiffBadges(sessions, sessionDiffs)
 
   return (
     <div className="app-shell h-[100dvh] max-h-[100dvh] overflow-hidden bg-noise text-white">
@@ -196,6 +354,7 @@ export default function App(): JSX.Element {
       >
         <Sidebar
           collapsed={sidebarCollapsed}
+          diffBadges={diffBadges}
           onOpenProject={handleOpenProject}
           onRefreshProject={handleRefreshProject}
           onToggleCollapse={() => {
@@ -205,7 +364,10 @@ export default function App(): JSX.Element {
           refreshing={refreshingProject}
         />
 
-        <div className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_148px_auto] overflow-hidden">
+        <div
+          className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden"
+          ref={shellViewportRef}
+        >
           <header className="shrink-0 border-b border-white/10 bg-sentinel-ink/55 px-8 pb-6 pt-12 backdrop-blur-xl">
             <div className="flex items-start justify-between gap-6">
               <div className="space-y-4">
@@ -274,7 +436,7 @@ export default function App(): JSX.Element {
             </div>
           </header>
 
-          <main className="min-h-0 overflow-hidden px-8 py-6">
+          <main className="min-h-0 overflow-hidden px-8 py-6" ref={dashboardViewportRef}>
             {!hasProject && (
               <section className="panel flex h-full min-h-0 flex-col items-center justify-center gap-6 border-dashed text-center">
                 <div className="border border-white/10 bg-white/[0.04] p-5">
@@ -313,8 +475,8 @@ export default function App(): JSX.Element {
                     <h2 className="text-2xl font-semibold text-white">No active agents yet</h2>
                     <p className="max-w-2xl text-sm leading-7 text-sentinel-mist">
                       Start a tile to create a fresh worktree, boot a PowerShell terminal inside it, and launch any CLI
-                      agent you want. Sentinel keeps the shell live, surfaces process usage, and preserves dirty
-                      worktrees instead of deleting in-progress edits.
+                      agent you want. Sentinel keeps the shell live, streams true per-process resource usage, and
+                      surfaces worktree diffs directly in the project tree.
                     </p>
                   </div>
                 </div>
@@ -356,15 +518,35 @@ export default function App(): JSX.Element {
               >
                 <AgentDashboard
                   fitNonce={fitNonce}
+                  histories={sessionHistories}
+                  maximizedSessionId={maximizedSessionId}
                   onClose={handleCloseSession}
+                  onToggleMaximize={(sessionId) => {
+                    setMaximizedSessionId((current) => (current === sessionId ? null : sessionId))
+                  }}
                   sessions={sessions}
                 />
               </Suspense>
             )}
           </main>
 
-          <ActivityLog entries={activityLog} />
-          <StatusBar summary={summary} />
+          <div className="min-h-0 overflow-hidden" ref={consoleDrawerRef}>
+            <ConsoleDrawer
+              entries={activityLog}
+              open={consoleOpen}
+              onToggleOpen={() => {
+                setConsoleOpen((current) => !current)
+              }}
+            />
+          </div>
+
+          <StatusBar
+            consoleOpen={consoleOpen}
+            onToggleConsole={() => {
+              setConsoleOpen((current) => !current)
+            }}
+            summary={summary}
+          />
         </div>
       </div>
     </div>

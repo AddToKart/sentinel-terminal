@@ -19,6 +19,7 @@ interface SidebarProps {
   project: ProjectState
   refreshing: boolean
   collapsed: boolean
+  diffBadges: Record<string, string[]>
   onOpenProject: () => void
   onRefreshProject: () => void
   onToggleCollapse: () => void
@@ -47,9 +48,29 @@ function fileIcon(name: string): JSX.Element {
   return <FileText className="h-4 w-4 text-sentinel-mist" />
 }
 
+function renderDiffBadges(badges: string[]): JSX.Element | null {
+  if (badges.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="ml-auto flex shrink-0 items-center gap-1">
+      <span className="border border-sentinel-accent/40 bg-sentinel-accent/12 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-white">
+        {badges[0]}
+      </span>
+      {badges.length > 1 && (
+        <span className="border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.2em] text-sentinel-mist">
+          +{badges.length - 1}
+        </span>
+      )}
+    </div>
+  )
+}
+
 function TreeNode({
   depth,
   expandedPaths,
+  diffBadges,
   node,
   toggle,
   onFileContextMenu
@@ -57,17 +78,24 @@ function TreeNode({
   node: ProjectNode
   depth: number
   expandedPaths: Set<string>
+  diffBadges: Record<string, string[]>
   toggle: (path: string) => void
   onFileContextMenu: (event: MouseEvent<HTMLButtonElement>, node: ProjectNode) => void
 }): JSX.Element {
   const isDirectory = node.kind === 'directory'
   const expanded = expandedPaths.has(node.path)
   const hasChildren = Boolean(node.children && node.children.length > 0)
+  const badges = node.kind === 'file' ? diffBadges[node.path] ?? [] : []
+  const isModified = badges.length > 0
 
   return (
     <div className="space-y-1">
       <button
-        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm text-sentinel-mist transition hover:bg-white/[0.05] hover:text-white"
+        className={`flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm transition ${
+          isModified
+            ? 'bg-sentinel-accent/10 text-white'
+            : 'text-sentinel-mist hover:bg-white/[0.05] hover:text-white'
+        }`}
         onClick={() => {
           if (isDirectory) {
             toggle(node.path)
@@ -102,7 +130,8 @@ function TreeNode({
           </>
         )}
 
-        <span className="truncate">{node.name}</span>
+        <span className="min-w-0 flex-1 truncate">{node.name}</span>
+        {renderDiffBadges(badges)}
       </button>
 
       {isDirectory && expanded && hasChildren && (
@@ -111,6 +140,7 @@ function TreeNode({
             <TreeNode
               key={child.path}
               depth={depth + 1}
+              diffBadges={diffBadges}
               expandedPaths={expandedPaths}
               node={child}
               onFileContextMenu={onFileContextMenu}
@@ -127,6 +157,7 @@ export function Sidebar({
   project,
   refreshing,
   collapsed,
+  diffBadges,
   onOpenProject,
   onRefreshProject,
   onToggleCollapse
@@ -300,7 +331,7 @@ export function Sidebar({
           <div className="text-xs font-medium uppercase tracking-[0.24em] text-sentinel-mist">Project Tree</div>
           {project.tree.length > 0 && (
             <div className="border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] uppercase tracking-[0.2em] text-sentinel-mist">
-              right-click files
+              live diff badges
             </div>
           )}
         </div>
@@ -317,6 +348,7 @@ export function Sidebar({
               <TreeNode
                 key={node.path}
                 depth={0}
+                diffBadges={diffBadges}
                 expandedPaths={expandedPaths}
                 node={node}
                 onFileContextMenu={handleFileContextMenu}

@@ -10,6 +10,14 @@ export interface ProcessMetrics {
   processCount: number
 }
 
+export interface SessionMetricsUpdate {
+  sessionId: string
+  pid?: number
+  processIds: number[]
+  metrics: ProcessMetrics
+  sampledAt: number
+}
+
 export interface ProjectNode {
   name: string
   path: string
@@ -64,11 +72,32 @@ export interface ActivityLogEntry {
   detail?: string
 }
 
+export interface SessionCommandEntry {
+  id: string
+  command: string
+  timestamp: number
+  source: 'interactive' | 'startup'
+}
+
+export interface SessionHistoryUpdate {
+  sessionId: string
+  entries: SessionCommandEntry[]
+}
+
+export interface SessionDiffUpdate {
+  sessionId: string
+  modifiedPaths: string[]
+  updatedAt: number
+}
+
 export interface BootstrapPayload {
   project: ProjectState
   sessions: SessionSummary[]
   summary: WorkspaceSummary
   activityLog: ActivityLogEntry[]
+  metrics: SessionMetricsUpdate[]
+  histories: SessionHistoryUpdate[]
+  diffs: SessionDiffUpdate[]
 }
 
 export interface CreateSessionInput {
@@ -95,6 +124,9 @@ export interface SentinelApi {
   openInSystemEditor: (filePath: string) => Promise<void>
   onSessionOutput: (listener: (event: SessionOutputEvent) => void) => () => void
   onSessionState: (listener: (session: SessionSummary) => void) => () => void
+  onSessionMetrics: (listener: (payload: SessionMetricsUpdate) => void) => () => void
+  onSessionHistory: (listener: (payload: SessionHistoryUpdate) => void) => () => void
+  onSessionDiff: (listener: (payload: SessionDiffUpdate) => void) => () => void
   onWorkspaceState: (listener: (summary: WorkspaceSummary) => void) => () => void
   onActivityLog: (listener: (entry: ActivityLogEntry) => void) => () => void
 }
