@@ -194,13 +194,23 @@ export default function App(): JSX.Element {
         </div>
       )}
 
-      {/* ============ TOP HEADER — draggable window titlebar ============ */}
+      {/* ============ TOP HEADER — draggable titlebar ============ */}
+      {/*
+       * Layout strategy:
+       *  - The entire bar is draggable
+       *  - Left cluster: sidebar toggle + project info (no-drag)
+       *  - Center: Multiplex/IDE toggle (absolute center, no-drag)
+       *  - Right: padding-only safe zone (≥140px) for Electron controls (never house buttons there)
+       */}
       <header
-        className="shrink-0 flex items-center justify-between border-b border-white/10 bg-black/30 px-4 py-1.5 gap-4"
+        className="shrink-0 relative flex items-center border-b border-white/10 bg-black/30 px-3 h-10"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
-        <div className="flex items-center gap-4 min-w-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          {/* Sidebar toggle */}
+        {/* LEFT CLUSTER — sidebar toggle + project  */}
+        <div
+          className="flex items-center gap-3 min-w-0 z-10"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
           <button
             className="shrink-0 inline-flex h-7 w-7 items-center justify-center text-sentinel-mist transition hover:text-white"
             onClick={toggleSidebar}
@@ -212,17 +222,37 @@ export default function App(): JSX.Element {
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-sm font-semibold tracking-tight text-white/90 whitespace-nowrap">Sentinel</span>
             {project.name && (
-              <div className="flex items-center gap-1.5 rounded border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-sentinel-mist truncate">
+              <div className="flex items-center gap-1.5 rounded border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-sentinel-mist truncate max-w-[220px]">
                 <GitBranch className="h-3 w-3 shrink-0" />
                 <span className="truncate">{project.name} · {project.branch}</span>
               </div>
             )}
           </div>
+
+          {/* Action buttons — in safe left zone */}
+          <div className="flex items-center gap-1.5 ml-2">
+            <button
+              className="inline-flex h-7 items-center gap-1.5 rounded border border-sentinel-accent/30 bg-sentinel-accent/10 px-3 text-[11px] font-semibold text-sentinel-glow transition hover:bg-sentinel-accent/20 disabled:opacity-40"
+              disabled={!hasProject}
+              onClick={() => void handleCreateSession()}
+            >
+              <Plus className="h-3 w-3" />
+              New Agent
+            </button>
+            <button
+              className="inline-flex h-7 w-7 items-center justify-center rounded border border-white/10 bg-white/[0.04] text-sentinel-mist transition hover:text-white disabled:opacity-40"
+              disabled={!hasProject}
+              onClick={() => void handleRefreshProject()}
+              title="Refresh project tree"
+            >
+              <RefreshCw className={`h-3 w-3 ${refreshingProject ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
         </div>
 
-        {/* Center: Global mode toggle */}
+        {/* CENTER — mode toggle (absolute so it's always precisely centered) */}
         <div
-          className="flex items-center rounded border border-white/10 bg-white/[0.04] p-0.5 shrink-0"
+          className="absolute left-1/2 -translate-x-1/2 flex items-center rounded border border-white/10 bg-white/[0.04] p-0.5"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           <button
@@ -243,24 +273,8 @@ export default function App(): JSX.Element {
           </button>
         </div>
 
-        {/* Right: Actions */}
-        <div className="flex items-center gap-2 shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          <button
-            className="inline-flex h-7 items-center gap-1.5 rounded border border-sentinel-accent/30 bg-sentinel-accent/10 px-3 text-[11px] font-semibold text-sentinel-glow transition hover:bg-sentinel-accent/20 disabled:opacity-40"
-            disabled={!hasProject}
-            onClick={() => void handleCreateSession()}
-          >
-            <Plus className="h-3 w-3" />
-            New Agent
-          </button>
-          <button
-            className="inline-flex h-7 items-center gap-1.5 rounded border border-white/10 bg-white/[0.04] px-2.5 text-[11px] text-sentinel-mist transition hover:text-white disabled:opacity-40"
-            disabled={!hasProject}
-            onClick={() => void handleOpenProject()}
-          >
-            <FolderOpen className="h-3 w-3" />
-          </button>
-        </div>
+        {/* RIGHT SAFE ZONE — deliberately empty, ≥140px reserved for Electron window controls (min/max/close) */}
+        <div className="ml-auto w-[140px] shrink-0" />
       </header>
 
       {/* ============ BODY ============ */}
