@@ -1,5 +1,5 @@
-import { Fragment } from 'react'
-import { GripHorizontal, GripVertical } from 'lucide-react'
+import { Fragment, useState } from 'react'
+import { GripHorizontal, GripVertical, LayoutGrid, Sidebar } from 'lucide-react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 
 import type { SessionCommandEntry, SessionSummary } from '@shared/types'
@@ -16,22 +16,9 @@ interface AgentDashboardProps {
 }
 
 function getColumnCount(sessionCount: number): number {
-  if (sessionCount <= 1) {
-    return 1
-  }
-
-  if (sessionCount === 2) {
-    return 2
-  }
-
-  if (sessionCount <= 4) {
-    return 2
-  }
-
-  if (sessionCount <= 9) {
-    return 3
-  }
-
+  if (sessionCount <= 1) return 1
+  if (sessionCount <= 4) return 2
+  if (sessionCount <= 9) return 3
   return Math.ceil(Math.sqrt(sessionCount))
 }
 
@@ -63,7 +50,6 @@ function columnMinSize(columnCount: number): number {
 
 function DashboardResizeHandle({ direction }: { direction: 'horizontal' | 'vertical' }): JSX.Element {
   const isHorizontal = direction === 'horizontal'
-
   return (
     <PanelResizeHandle
       className={
@@ -87,6 +73,8 @@ export function AgentDashboard({
   maximizedSessionId,
   fitNonce
 }: AgentDashboardProps): JSX.Element {
+  const [layoutMode, setLayoutMode] = useState<'grid' | 'master-stack'>('master-stack')
+
   const visibleSessions = maximizedSessionId
     ? sessions.filter((session) => session.id === maximizedSessionId)
     : sessions
@@ -97,7 +85,6 @@ export function AgentDashboard({
 
   if (visibleSessions.length === 1 && maximizedSessionId) {
     const session = visibleSessions[0]
-
     return (
       <div className="h-full min-h-0 min-w-0 overflow-hidden border border-white/10 bg-black/10 p-2">
         <div className="h-full min-h-0 min-w-0 p-1.5">
@@ -108,17 +95,102 @@ export function AgentDashboard({
             onClose={onClose}
             onToggleMaximize={onToggleMaximize}
             session={session}
+            mergeWorktree={() => window.sentinel.mergeWorktree(session.id)}
           />
         </div>
       </div>
     )
   }
 
+  const renderLayoutToggle = () => (
+    <div className="absolute top-4 right-4 z-50 flex items-center gap-1 rounded border border-white/10 bg-black/40 p-1 backdrop-blur">
+      <button
+        className={`rounded p-1.5 text-xs transition ${
+          layoutMode === 'grid' ? 'bg-sentinel-accent/20 text-white' : 'text-sentinel-mist hover:text-white'
+        }`}
+        onClick={() => setLayoutMode('grid')}
+        title="Even Quadrant Grid"
+        type="button"
+      >
+        <LayoutGrid className="h-3.5 w-3.5" />
+      </button>
+      <button
+        className={`rounded p-1.5 text-xs transition ${
+          layoutMode === 'master-stack' ? 'bg-sentinel-accent/20 text-white' : 'text-sentinel-mist hover:text-white'
+        }`}
+        onClick={() => setLayoutMode('master-stack')}
+        title="Master-Stack Layout"
+        type="button"
+      >
+        <Sidebar className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  )
+
+  const dashboardId = visibleSessions.map((s) => s.id).join('-')
+
+  if (layoutMode === 'master-stack' && visibleSessions.length >= 3) {
+    const masterSession = visibleSessions[0]
+    const stackSessions = visibleSessions.slice(1)
+
+    return (
+      <div className="relative h-full min-h-0 min-w-0 overflow-hidden border border-white/10 bg-black/10 p-2">
+        {renderLayoutToggle()}
+        <PanelGroup
+          autoSaveId={`sentinel-dashboard-master-${dashboardId}`}
+          className="h-full min-h-0"
+          direction="horizontal"
+        >
+          <Panel className="min-h-0 min-w-0" defaultSize={65} minSize={30}>
+            <div className="h-full min-h-0 min-w-0 p-1.5">
+              <SessionTile
+                fitNonce={fitNonce}
+                historyEntries={histories[masterSession.id] ?? []}
+                isMaximized={false}
+                onClose={onClose}
+                onToggleMaximize={onToggleMaximize}
+                session={masterSession}
+                mergeWorktree={() => window.sentinel.mergeWorktree(masterSession.id)}
+              />
+            </div>
+          </Panel>
+          <DashboardResizeHandle direction="vertical" />
+          <Panel className="min-h-0 min-w-0" defaultSize={35} minSize={20}>
+            <PanelGroup
+              autoSaveId={`sentinel-dashboard-stack-${dashboardId}`}
+              className="h-full min-h-0"
+              direction="vertical"
+            >
+              {stackSessions.map((session, index) => (
+                <Fragment key={session.id}>
+                  {index > 0 && <DashboardResizeHandle direction="horizontal" />}
+                  <Panel className="min-h-0 min-w-0" defaultSize={100 / stackSessions.length} minSize={15}>
+                    <div className="h-full min-h-0 min-w-0 p-1.5">
+                      <SessionTile
+                        fitNonce={fitNonce}
+                        historyEntries={histories[session.id] ?? []}
+                        isMaximized={false}
+                        onClose={onClose}
+                        onToggleMaximize={onToggleMaximize}
+                        session={session}
+                        mergeWorktree={() => window.sentinel.mergeWorktree(session.id)}
+                      />
+                    </div>
+                  </Panel>
+                </Fragment>
+              ))}
+            </PanelGroup>
+          </Panel>
+        </PanelGroup>
+      </div>
+    )
+  }
+
   const rows = buildRows(visibleSessions)
-  const dashboardId = visibleSessions.map((session) => session.id).join('-')
 
   return (
-    <div className="h-full min-h-0 min-w-0 overflow-hidden border border-white/10 bg-black/10 p-2">
+    <div className="relative h-full min-h-0 min-w-0 overflow-hidden border border-white/10 bg-black/10 p-2">
+      {visibleSessions.length >= 3 && renderLayoutToggle()}
       <PanelGroup
         autoSaveId={`sentinel-dashboard-${dashboardId}`}
         className="h-full min-h-0"
@@ -126,7 +198,6 @@ export function AgentDashboard({
       >
         {rows.map((row, rowIndex) => {
           const rowId = row.map((session) => session.id).join('-')
-
           return (
             <Fragment key={rowId}>
               {rowIndex > 0 && <DashboardResizeHandle direction="horizontal" />}
@@ -156,6 +227,7 @@ export function AgentDashboard({
                             onClose={onClose}
                             onToggleMaximize={onToggleMaximize}
                             session={session}
+                            mergeWorktree={() => window.sentinel.mergeWorktree(session.id)}
                           />
                         </div>
                       </Panel>

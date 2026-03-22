@@ -29,6 +29,9 @@ const AgentDashboard = lazy(async () => {
 import { ConsoleDrawer } from './components/ConsoleDrawer'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
+import { CodePreview } from './components/CodePreview'
+import { GlobalActionBar } from './components/GlobalActionBar'
+import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 
 const emptyProject = (): ProjectState => ({
   isGitRepo: false,
@@ -130,6 +133,8 @@ export default function App(): JSX.Element {
   const [fitNonce, setFitNonce] = useState(0)
   const [maximizedSessionId, setMaximizedSessionId] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
+  const [globalActionBarOpen, setGlobalActionBarOpen] = useState(false)
   const shellViewportRef = useRef<HTMLDivElement | null>(null)
   const dashboardViewportRef = useRef<HTMLDivElement | null>(null)
   const consoleDrawerRef = useRef<HTMLDivElement | null>(null)
@@ -258,6 +263,12 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent): void {
+      if (event.ctrlKey && event.code === 'KeyK') {
+        event.preventDefault()
+        setGlobalActionBarOpen((current) => !current)
+        return
+      }
+
       if (!event.ctrlKey || event.altKey || event.shiftKey || event.code !== 'Backquote') {
         return
       }
@@ -271,6 +282,14 @@ export default function App(): JSX.Element {
       window.removeEventListener('keydown', handleKeyDown, { capture: true })
     }
   }, [])
+
+  const globalActions = [
+    { id: 'new-agent', label: 'New Agent', icon: <Plus className="h-4 w-4" />, execute: () => void handleCreateSession() },
+    { id: 'open-project', label: 'Open Repository', icon: <FolderOpen className="h-4 w-4" />, execute: () => void handleOpenProject() },
+    { id: 'refresh-project', label: 'Refresh Tree', icon: <RefreshCw className="h-4 w-4" />, execute: () => void handleRefreshProject() },
+    { id: 'toggle-sidebar', label: 'Toggle Sidebar', icon: <PanelLeft className="h-4 w-4" />, execute: () => setSidebarCollapsed(c => !c) },
+    { id: 'toggle-console', label: 'Toggle Console', icon: <TerminalSquare className="h-4 w-4" />, execute: () => setConsoleOpen(c => !c) },
+  ]
 
   async function handleOpenProject(): Promise<void> {
     setErrorMessage(null)
@@ -362,6 +381,7 @@ export default function App(): JSX.Element {
           }}
           project={project}
           refreshing={refreshingProject}
+          onFileSelect={setSelectedFilePath}
         />
 
         <div
@@ -516,16 +536,42 @@ export default function App(): JSX.Element {
                   </section>
                 }
               >
-                <AgentDashboard
-                  fitNonce={fitNonce}
-                  histories={sessionHistories}
-                  maximizedSessionId={maximizedSessionId}
-                  onClose={handleCloseSession}
-                  onToggleMaximize={(sessionId) => {
-                    setMaximizedSessionId((current) => (current === sessionId ? null : sessionId))
-                  }}
-                  sessions={sessions}
-                />
+                {selectedFilePath ? (
+                  <PanelGroup direction="vertical" autoSaveId="sentinel-split-view">
+                    <Panel defaultSize={60} minSize={20} className="min-h-0 relative">
+                      <AgentDashboard
+                        fitNonce={fitNonce}
+                        histories={sessionHistories}
+                        maximizedSessionId={maximizedSessionId}
+                        onClose={handleCloseSession}
+                        onToggleMaximize={(sessionId) => {
+                          setMaximizedSessionId((current) => (current === sessionId ? null : sessionId))
+                        }}
+                        sessions={sessions}
+                      />
+                    </Panel>
+                    <PanelResizeHandle className="h-2 bg-transparent hover:bg-sentinel-accent/20 cursor-row-resize transition-colors" />
+                    <Panel defaultSize={40} minSize={20} className="min-h-0 relative">
+                      <CodePreview 
+                        filePath={selectedFilePath} 
+                        projectPath={project.path}
+                        sessions={sessions} 
+                        onClose={() => setSelectedFilePath(null)} 
+                      />
+                    </Panel>
+                  </PanelGroup>
+                ) : (
+                  <AgentDashboard
+                    fitNonce={fitNonce}
+                    histories={sessionHistories}
+                    maximizedSessionId={maximizedSessionId}
+                    onClose={handleCloseSession}
+                    onToggleMaximize={(sessionId) => {
+                      setMaximizedSessionId((current) => (current === sessionId ? null : sessionId))
+                    }}
+                    sessions={sessions}
+                  />
+                )}
               </Suspense>
             )}
           </main>
@@ -549,6 +595,12 @@ export default function App(): JSX.Element {
           />
         </div>
       </div>
+
+      <GlobalActionBar 
+        isOpen={globalActionBarOpen} 
+        onClose={() => setGlobalActionBarOpen(false)} 
+        actions={globalActions} 
+      />
     </div>
   )
 }

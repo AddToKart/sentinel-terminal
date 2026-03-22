@@ -23,6 +23,7 @@ interface SidebarProps {
   onOpenProject: () => void
   onRefreshProject: () => void
   onToggleCollapse: () => void
+  onFileSelect: (path: string) => void
 }
 
 interface FileContextMenuState {
@@ -73,6 +74,7 @@ function TreeNode({
   diffBadges,
   node,
   toggle,
+  onFileSelect,
   onFileContextMenu
 }: {
   node: ProjectNode
@@ -80,6 +82,7 @@ function TreeNode({
   expandedPaths: Set<string>
   diffBadges: Record<string, string[]>
   toggle: (path: string) => void
+  onFileSelect: (path: string) => void
   onFileContextMenu: (event: MouseEvent<HTMLButtonElement>, node: ProjectNode) => void
 }): JSX.Element {
   const isDirectory = node.kind === 'directory'
@@ -99,6 +102,8 @@ function TreeNode({
         onClick={() => {
           if (isDirectory) {
             toggle(node.path)
+          } else {
+            onFileSelect(node.path)
           }
         }}
         onContextMenu={(event) => {
@@ -143,6 +148,7 @@ function TreeNode({
               diffBadges={diffBadges}
               expandedPaths={expandedPaths}
               node={child}
+              onFileSelect={onFileSelect}
               onFileContextMenu={onFileContextMenu}
               toggle={toggle}
             />
@@ -160,7 +166,8 @@ export function Sidebar({
   diffBadges,
   onOpenProject,
   onRefreshProject,
-  onToggleCollapse
+  onToggleCollapse,
+  onFileSelect
 }: SidebarProps): JSX.Element {
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null)
@@ -351,6 +358,7 @@ export function Sidebar({
                 diffBadges={diffBadges}
                 expandedPaths={expandedPaths}
                 node={node}
+                onFileSelect={onFileSelect}
                 onFileContextMenu={handleFileContextMenu}
                 toggle={toggle}
               />

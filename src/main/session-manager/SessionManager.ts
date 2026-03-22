@@ -256,6 +256,34 @@ export class SessionManager extends EventEmitter {
     record.terminal.write(data)
   }
 
+  async readFile(filePath: string): Promise<string> {
+    try {
+      return await fs.readFile(filePath, 'utf-8')
+    } catch {
+      return ''
+    }
+  }
+
+  async readFileDiff(sessionId: string, filePath: string): Promise<string> {
+    const record = this.sessionRecords.get(sessionId)
+    if (!record) return ''
+    try {
+      return await this.runGitCommand(record.summary.worktreePath, ['diff', 'HEAD', '--', filePath])
+    } catch {
+      return ''
+    }
+  }
+
+  async mergeWorktree(sessionId: string): Promise<void> {
+    const record = this.sessionRecords.get(sessionId)
+    if (!record || !this.projectState.path) {
+      throw new Error('Session or project not found.')
+    }
+
+    // Merge the worktree's branch into the root project
+    await this.runGitCommand(this.projectState.path, ['merge', record.summary.branchName])
+  }
+
   async resizeSession(sessionId: string, cols: number, rows: number): Promise<void> {
     const record = this.sessionRecords.get(sessionId)
     if (!record || cols <= 0 || rows <= 0) {

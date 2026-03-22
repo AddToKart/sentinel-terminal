@@ -71,6 +71,11 @@ function registerIpcHandlers(): void {
   ipcMain.handle('sentinel:send-input', (_event, payload: { sessionId: string; data: string }) =>
     sessionManager.sendInput(payload.sessionId, payload.data)
   )
+  ipcMain.handle('sentinel:read-file', (_event, filePath: string) => sessionManager.readFile(filePath))
+  ipcMain.handle('sentinel:read-file-diff', (_event, payload: { sessionId: string; filePath: string }) =>
+    sessionManager.readFileDiff(payload.sessionId, payload.filePath)
+  )
+  ipcMain.handle('sentinel:merge-worktree', (_event, sessionId: string) => sessionManager.mergeWorktree(sessionId))
   ipcMain.handle('sentinel:reveal-in-file-explorer', (_event, filePath: string) => {
     shell.showItemInFolder(filePath)
   })

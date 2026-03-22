@@ -34,6 +34,12 @@ const api: SentinelApi = {
     ipcRenderer.invoke('sentinel:resize-session', { sessionId, cols, rows }) as Promise<void>,
   sendInput: (sessionId: string, data: string) =>
     ipcRenderer.invoke('sentinel:send-input', { sessionId, data }) as Promise<void>,
+  readFile: (filePath: string) =>
+    ipcRenderer.invoke('sentinel:read-file', filePath) as Promise<string>,
+  readFileDiff: (sessionId: string, filePath: string) =>
+    ipcRenderer.invoke('sentinel:read-file-diff', { sessionId, filePath }) as Promise<string>,
+  mergeWorktree: (sessionId: string) =>
+    ipcRenderer.invoke('sentinel:merge-worktree', sessionId) as Promise<void>,
   revealInFileExplorer: (filePath: string) =>
     ipcRenderer.invoke('sentinel:reveal-in-file-explorer', filePath) as Promise<void>,
   openInSystemEditor: (filePath: string) =>
