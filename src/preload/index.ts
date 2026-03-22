@@ -40,6 +40,10 @@ const api: SentinelApi = {
     ipcRenderer.invoke('sentinel:read-file-diff', { sessionId, filePath }) as Promise<string>,
   mergeWorktree: (sessionId: string) =>
     ipcRenderer.invoke('sentinel:merge-worktree', sessionId) as Promise<void>,
+  commitWorktree: (sessionId: string, message: string) =>
+    ipcRenderer.invoke('sentinel:commit-worktree', { sessionId, message }) as Promise<void>,
+  discardWorktree: (sessionId: string) =>
+    ipcRenderer.invoke('sentinel:discard-worktree', sessionId) as Promise<void>,
   revealInFileExplorer: (filePath: string) =>
     ipcRenderer.invoke('sentinel:reveal-in-file-explorer', filePath) as Promise<void>,
   openInSystemEditor: (filePath: string) =>

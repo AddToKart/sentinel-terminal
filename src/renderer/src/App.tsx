@@ -1,44 +1,26 @@
-import { Suspense, lazy, useEffect, useRef, useState } from 'react'
-import {
-  ArrowRight,
-  FolderOpen,
-  GitBranch,
-  PanelLeft,
-  Plus,
-  RefreshCw,
-  Sparkles,
-  TerminalSquare
-} from 'lucide-react'
+import { Suspense, useEffect, useRef, useState } from 'react'
+import { FolderOpen, GitBranch, PanelLeft, Plus, RefreshCw, TerminalSquare } from 'lucide-react'
+import { ImperativePanelHandle, Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 
-import type {
-  ActivityLogEntry,
-  ProjectState,
-  SessionCommandEntry,
-  SessionDiffUpdate,
-  SessionHistoryUpdate,
-  SessionMetricsUpdate,
-  SessionSummary,
-  WorkspaceSummary
-} from '@shared/types'
-
-const AgentDashboard = lazy(async () => {
-  const module = await import('./components/AgentDashboard')
-  return { default: module.AgentDashboard }
-})
-
+import { AgentDashboard } from './components/AgentDashboard'
+import { CodePreview } from './components/CodePreview'
 import { ConsoleDrawer } from './components/ConsoleDrawer'
+import { GlobalActionBar } from './components/GlobalActionBar'
+import { SessionTile } from './components/SessionTile'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
-import { CodePreview } from './components/CodePreview'
-import { GlobalActionBar } from './components/GlobalActionBar'
-import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
+
+import type { ActivityLogEntry, ProjectState, SessionCommandEntry, SessionSummary, WorkspaceSummary } from '@shared/types'
 
 const emptyProject = (): ProjectState => ({
   isGitRepo: false,
-  tree: []
+  tree: [],
+  name: undefined,
+  path: undefined,
+  branch: undefined
 })
 
-const emptySummary = (): WorkspaceSummary => ({
+const defaultSummary = (): WorkspaceSummary => ({
   activeSessions: 0,
   totalCpuPercent: 0,
   totalMemoryMb: 0,
@@ -46,88 +28,14 @@ const emptySummary = (): WorkspaceSummary => ({
   lastUpdated: Date.now()
 })
 
-const emptyActivityLog = (): ActivityLogEntry[] => []
-
-function upsertSession(current: SessionSummary[], incoming: SessionSummary): SessionSummary[] {
-  const next = current.some((session) => session.id === incoming.id)
-    ? current.map((session) => (session.id === incoming.id ? incoming : session))
-    : [incoming, ...current]
-
-  return next.sort((left, right) => right.createdAt - left.createdAt)
-}
-
-function applyMetricsUpdate(current: SessionSummary[], incoming: SessionMetricsUpdate): SessionSummary[] {
-  return current.map((session) =>
-    session.id === incoming.sessionId
-      ? {
-          ...session,
-          pid: incoming.pid ?? session.pid,
-          metrics: incoming.metrics
-        }
-      : session
-  )
-}
-
-function projectSubtitle(project: ProjectState): string {
-  if (!project.path) {
-    return 'Open a Git repository to launch isolated agent worktrees.'
-  }
-
-  if (project.isGitRepo) {
-    return project.branch ? `${project.name} on ${project.branch}` : `${project.name} in detached HEAD`
-  }
-
-  return `${project.name} folder view. Worktree sessions require Git.`
-}
-
-function historyMapFromPayload(
-  payload: SessionHistoryUpdate[]
-): Record<string, SessionCommandEntry[]> {
-  return Object.fromEntries(payload.map((entry) => [entry.sessionId, entry.entries]))
-}
-
-function diffMapFromPayload(payload: SessionDiffUpdate[]): Record<string, string[]> {
-  return Object.fromEntries(payload.map((entry) => [entry.sessionId, entry.modifiedPaths]))
-}
-
-function pruneKeyedState<T>(current: Record<string, T>, validIds: Set<string>): Record<string, T> {
-  return Object.fromEntries(Object.entries(current).filter(([sessionId]) => validIds.has(sessionId)))
-}
-
-function buildDiffBadges(
-  sessions: SessionSummary[],
-  sessionDiffs: Record<string, string[]>
-): Record<string, string[]> {
-  const labelBySessionId = new Map(sessions.map((session) => [session.id, session.label.toUpperCase()]))
-  const next: Record<string, string[]> = {}
-
-  for (const [sessionId, modifiedPaths] of Object.entries(sessionDiffs)) {
-    const label = labelBySessionId.get(sessionId)
-    if (!label) {
-      continue
-    }
-
-    for (const filePath of modifiedPaths) {
-      next[filePath] = [...(next[filePath] ?? []), label]
-    }
-  }
-
-  for (const filePath of Object.keys(next)) {
-    next[filePath] = [...new Set(next[filePath])].sort((left, right) => left.localeCompare(right))
-  }
-
-  return next
-}
-
 export default function App(): JSX.Element {
-  const [project, setProject] = useState<ProjectState>(emptyProject)
+  const [project, setProject] = useState<ProjectState>(emptyProject())
   const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [summary, setSummary] = useState<WorkspaceSummary>(emptySummary)
-  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(emptyActivityLog)
+  const [workspaceSummary, setWorkspaceSummary] = useState<WorkspaceSummary>(defaultSummary())
   const [sessionHistories, setSessionHistories] = useState<Record<string, SessionCommandEntry[]>>({})
   const [sessionDiffs, setSessionDiffs] = useState<Record<string, string[]>>({})
-  const [creatingSession, setCreatingSession] = useState(false)
-  const [refreshingProject, setRefreshingProject] = useState(false)
+  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([])
+
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [fitNonce, setFitNonce] = useState(0)
@@ -135,471 +43,374 @@ export default function App(): JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const [globalActionBarOpen, setGlobalActionBarOpen] = useState(false)
+  const [globalMode, setGlobalMode] = useState<'multiplex' | 'ide'>('multiplex')
+  const [refreshingProject, setRefreshingProject] = useState(false)
+
+  const sidebarPanelRef = useRef<ImperativePanelHandle | null>(null)
   const shellViewportRef = useRef<HTMLDivElement | null>(null)
-  const dashboardViewportRef = useRef<HTMLDivElement | null>(null)
-  const consoleDrawerRef = useRef<HTMLDivElement | null>(null)
-  const sessionIdSignature = sessions.map((session) => session.id).join('|')
 
+  // Bootstrap
   useEffect(() => {
-    let disposed = false
-
-    void window.sentinel
-      .bootstrap()
-      .then((payload) => {
-        if (disposed) {
-          return
-        }
-
+    async function init() {
+      try {
+        const payload = await window.sentinel.bootstrap()
         setProject(payload.project)
-        setSessions(payload.metrics.reduce(applyMetricsUpdate, payload.sessions))
-        setSummary(payload.summary)
+        setSessions(payload.sessions)
+        setWorkspaceSummary(payload.summary)
         setActivityLog(payload.activityLog)
-        setSessionHistories(historyMapFromPayload(payload.histories))
-        setSessionDiffs(diffMapFromPayload(payload.diffs))
-      })
-      .catch((error: unknown) => {
-        if (disposed) {
-          return
-        }
 
-        setErrorMessage(error instanceof Error ? error.message : 'Sentinel could not initialize.')
-      })
+        const histories: Record<string, SessionCommandEntry[]> = {}
+        for (const u of payload.histories) histories[u.sessionId] = u.entries
+        setSessionHistories(histories)
 
-    const removeSessionListener = window.sentinel.onSessionState((session) => {
-      setSessions((current) => upsertSession(current, session))
-    })
+        const diffs: Record<string, string[]> = {}
+        for (const u of payload.diffs) diffs[u.sessionId] = u.modifiedPaths
+        setSessionDiffs(diffs)
 
-    const removeMetricsListener = window.sentinel.onSessionMetrics((payload) => {
-      setSessions((current) => applyMetricsUpdate(current, payload))
-    })
-
-    const removeHistoryListener = window.sentinel.onSessionHistory((payload) => {
-      setSessionHistories((current) => ({
-        ...current,
-        [payload.sessionId]: payload.entries
-      }))
-    })
-
-    const removeDiffListener = window.sentinel.onSessionDiff((payload) => {
-      setSessionDiffs((current) => ({
-        ...current,
-        [payload.sessionId]: payload.modifiedPaths
-      }))
-    })
-
-    const removeWorkspaceListener = window.sentinel.onWorkspaceState((workspaceState) => {
-      setSummary(workspaceState)
-    })
-
-    const removeActivityListener = window.sentinel.onActivityLog((entry) => {
-      setActivityLog((current) => [entry, ...current].slice(0, 160))
-    })
-
-    return () => {
-      disposed = true
-      removeSessionListener()
-      removeMetricsListener()
-      removeHistoryListener()
-      removeDiffListener()
-      removeWorkspaceListener()
-      removeActivityListener()
+        const unsubs = [
+          window.sentinel.onActivityLog((entry) => {
+            setActivityLog((cur) => {
+              const i = cur.findIndex((e) => e.id === entry.id)
+              if (i >= 0) { const n = [...cur]; n[i] = entry; return n }
+              return [entry, ...cur].slice(0, 100)
+            })
+          }),
+          window.sentinel.onWorkspaceState(setWorkspaceSummary),
+          window.sentinel.onSessionState((session) => {
+            setSessions((cur) => {
+              const i = cur.findIndex((s) => s.id === session.id)
+              if (i >= 0) { const n = [...cur]; n[i] = session; return n }
+              return [...cur, session]
+            })
+          }),
+          window.sentinel.onSessionDiff((u) => {
+            setSessionDiffs((cur) => ({ ...cur, [u.sessionId]: u.modifiedPaths }))
+          }),
+          window.sentinel.onSessionHistory((u) => {
+            setSessionHistories((cur) => ({ ...cur, [u.sessionId]: u.entries }))
+          }),
+          window.sentinel.onSessionMetrics((u) => {
+            setSessions((cur) => {
+              const i = cur.findIndex((s) => s.id === u.sessionId)
+              if (i >= 0) { const n = [...cur]; n[i] = { ...n[i], metrics: u.metrics }; return n }
+              return cur
+            })
+          }),
+        ]
+        return () => unsubs.forEach((fn) => fn())
+      } catch {
+        setErrorMessage('Failed to initialize Sentinel.')
+      }
     }
+    void init()
   }, [])
 
+  // Global ResizeObserver to re-fit terminals after any layout change
   useEffect(() => {
-    const validSessionIds = new Set(sessions.map((session) => session.id))
-
-    setSessionHistories((current) => pruneKeyedState(current, validSessionIds))
-    setSessionDiffs((current) => pruneKeyedState(current, validSessionIds))
-
-    if (maximizedSessionId && !validSessionIds.has(maximizedSessionId)) {
-      setMaximizedSessionId(null)
-    }
-  }, [sessionIdSignature, maximizedSessionId])
-
-  useEffect(() => {
-    const observedElements = [
-      shellViewportRef.current,
-      dashboardViewportRef.current,
-      consoleDrawerRef.current
-    ].filter((element): element is HTMLDivElement => Boolean(element))
-
-    if (observedElements.length === 0) {
-      return
-    }
-
-    let frameId = 0
-    const triggerFit = (): void => {
-      window.cancelAnimationFrame(frameId)
-      frameId = window.requestAnimationFrame(() => {
-        setFitNonce((current) => current + 1)
-      })
-    }
-
+    let timer: number | null = null
     const observer = new ResizeObserver(() => {
-      triggerFit()
+      if (timer) clearTimeout(timer)
+      timer = window.setTimeout(() => setFitNonce((n) => n + 1), 80)
     })
-
-    observedElements.forEach((element) => observer.observe(element))
-    triggerFit()
-
-    return () => {
-      window.cancelAnimationFrame(frameId)
-      observer.disconnect()
-    }
+    if (shellViewportRef.current) observer.observe(shellViewportRef.current)
+    return () => observer.disconnect()
   }, [])
 
+  // Trigger a re-fit when sidebar or console changes
   useEffect(() => {
-    const timerIds = [0, 180, 320].map((delay) =>
-      window.setTimeout(() => {
-        setFitNonce((current) => current + 1)
-      }, delay)
-    )
+    const timer = window.setTimeout(() => setFitNonce((n) => n + 1), 120)
+    return () => clearTimeout(timer)
+  }, [sidebarCollapsed, consoleOpen, globalMode])
 
-    return () => {
-      timerIds.forEach((timerId) => window.clearTimeout(timerId))
-    }
-  }, [sidebarCollapsed, consoleOpen, sessions.length, maximizedSessionId])
-
+  // Keyboard shortcuts
   useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent): void {
-      if (event.ctrlKey && event.code === 'KeyK') {
-        event.preventDefault()
-        setGlobalActionBarOpen((current) => !current)
-        return
-      }
-
-      if (!event.ctrlKey || event.altKey || event.shiftKey || event.code !== 'Backquote') {
-        return
-      }
-
-      event.preventDefault()
-      setConsoleOpen((current) => !current)
+    function onKey(e: KeyboardEvent) {
+      if (e.ctrlKey && e.code === 'KeyK') { e.preventDefault(); setGlobalActionBarOpen((v) => !v); return }
+      if (e.ctrlKey && !e.altKey && !e.shiftKey && e.code === 'Backquote') { e.preventDefault(); setConsoleOpen((v) => !v) }
     }
-
-    window.addEventListener('keydown', handleKeyDown, { capture: true })
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown, { capture: true })
-    }
+    window.addEventListener('keydown', onKey, { capture: true })
+    return () => window.removeEventListener('keydown', onKey, { capture: true })
   }, [])
+
+  // Sidebar panel imperative API
+  function toggleSidebar() {
+    if (sidebarCollapsed) {
+      sidebarPanelRef.current?.expand()
+    } else {
+      sidebarPanelRef.current?.collapse()
+    }
+    setSidebarCollapsed((v) => !v)
+  }
+
+  async function handleOpenProject() {
+    try { const p = await window.sentinel.selectProject(); setProject(p); setSelectedFilePath(null) }
+    catch (e: any) { if (e.message !== 'Dialog cancelled') setErrorMessage(`Failed to open project: ${e.message}`) }
+  }
+
+  async function handleRefreshProject() {
+    if (!project.path) return
+    setRefreshingProject(true)
+    try { setProject(await window.sentinel.refreshProject()) }
+    catch (e: any) { setErrorMessage(`Failed to refresh: ${e.message}`) }
+    finally { setRefreshingProject(false) }
+  }
+
+  async function handleCreateSession() {
+    if (!project.path) return
+    try { await window.sentinel.createSession() }
+    catch (e: any) { setErrorMessage(`Failed to start session: ${e.message}`) }
+  }
+
+  async function handleCloseSession(sessionId: string) {
+    if (maximizedSessionId === sessionId) setMaximizedSessionId(null)
+    try { await window.sentinel.closeSession(sessionId) }
+    catch (e: any) { setErrorMessage(`Failed to close session: ${e.message}`) }
+  }
 
   const globalActions = [
     { id: 'new-agent', label: 'New Agent', icon: <Plus className="h-4 w-4" />, execute: () => void handleCreateSession() },
     { id: 'open-project', label: 'Open Repository', icon: <FolderOpen className="h-4 w-4" />, execute: () => void handleOpenProject() },
     { id: 'refresh-project', label: 'Refresh Tree', icon: <RefreshCw className="h-4 w-4" />, execute: () => void handleRefreshProject() },
-    { id: 'toggle-sidebar', label: 'Toggle Sidebar', icon: <PanelLeft className="h-4 w-4" />, execute: () => setSidebarCollapsed(c => !c) },
-    { id: 'toggle-console', label: 'Toggle Console', icon: <TerminalSquare className="h-4 w-4" />, execute: () => setConsoleOpen(c => !c) },
+    { id: 'toggle-sidebar', label: 'Toggle Sidebar', icon: <PanelLeft className="h-4 w-4" />, execute: toggleSidebar },
+    { id: 'toggle-console', label: 'Toggle Console', icon: <TerminalSquare className="h-4 w-4" />, execute: () => setConsoleOpen((v) => !v) },
+    { id: 'ide-mode', label: 'Switch to IDE Mode', icon: <TerminalSquare className="h-4 w-4" />, execute: () => setGlobalMode('ide') },
+    { id: 'multiplex-mode', label: 'Switch to Multiplex Mode', icon: <TerminalSquare className="h-4 w-4" />, execute: () => setGlobalMode('multiplex') },
   ]
 
-  async function handleOpenProject(): Promise<void> {
-    setErrorMessage(null)
-
-    try {
-      const nextProject = await window.sentinel.selectProject()
-      setProject(nextProject)
-    } catch (error: unknown) {
-      setErrorMessage(error instanceof Error ? error.message : 'Sentinel could not open the selected folder.')
-    }
-  }
-
-  async function handleRefreshProject(): Promise<void> {
-    setErrorMessage(null)
-    setRefreshingProject(true)
-
-    try {
-      const nextProject = await window.sentinel.refreshProject()
-      setProject(nextProject)
-    } catch (error: unknown) {
-      setErrorMessage(error instanceof Error ? error.message : 'Sentinel could not refresh the project tree.')
-    } finally {
-      setRefreshingProject(false)
-    }
-  }
-
-  async function handleCreateSession(): Promise<void> {
-    setErrorMessage(null)
-    setCreatingSession(true)
-
-    try {
-      let activeProject = project
-      if (!activeProject.path) {
-        activeProject = await window.sentinel.selectProject()
-        setProject(activeProject)
-      }
-
-      if (!activeProject.isGitRepo) {
-        throw new Error('Sentinel needs a Git repository to create an isolated worktree-backed session.')
-      }
-
-      const session = await window.sentinel.createSession()
-      setSessions((current) => upsertSession(current, session))
-    } catch (error: unknown) {
-      setErrorMessage(error instanceof Error ? error.message : 'Sentinel could not create the agent session.')
-    } finally {
-      setCreatingSession(false)
-    }
-  }
-
-  async function handleCloseSession(sessionId: string): Promise<void> {
-    setErrorMessage(null)
-
-    try {
-      await window.sentinel.closeSession(sessionId)
-      setSessions((current) => {
-        const nextSessions = current.filter((session) => session.id !== sessionId)
-        const nextSessionIds = new Set(nextSessions.map((session) => session.id))
-        setSessionHistories((history) => pruneKeyedState(history, nextSessionIds))
-        setSessionDiffs((diffs) => pruneKeyedState(diffs, nextSessionIds))
-        return nextSessions
-      })
-      if (maximizedSessionId === sessionId) {
-        setMaximizedSessionId(null)
-      }
-    } catch (error: unknown) {
-      setErrorMessage(error instanceof Error ? error.message : 'Sentinel could not close the agent session.')
-    }
-  }
-
   const hasProject = Boolean(project.path)
-  const diffBadges = buildDiffBadges(sessions, sessionDiffs)
+  const diffBadges = Object.fromEntries(
+    Object.values(sessionDiffs).flat().map((p) => [p, ['modified']])
+  )
+
+  // The active IDE session (for the bottom tray)
+  const ideSession = sessions.find((s) => s.id === maximizedSessionId) ?? sessions[0] ?? null
 
   return (
-    <div className="app-shell h-[100dvh] max-h-[100dvh] overflow-hidden bg-noise text-white">
-      <div
-        className="grid h-full min-h-0 overflow-hidden transition-[grid-template-columns] duration-300 ease-out"
-        style={{
-          gridTemplateColumns: sidebarCollapsed ? '84px minmax(0, 1fr)' : '320px minmax(0, 1fr)'
-        }}
+    <div className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-[#060a0f] text-white select-none">
+      {errorMessage && (
+        <div className="shrink-0 bg-rose-500/10 px-4 py-2 text-sm text-rose-200 border-b border-rose-500/20">
+          {errorMessage}
+          <button className="ml-3 underline opacity-70 hover:opacity-100" onClick={() => setErrorMessage(null)}>dismiss</button>
+        </div>
+      )}
+
+      {/* ============ TOP HEADER — draggable window titlebar ============ */}
+      <header
+        className="shrink-0 flex items-center justify-between border-b border-white/10 bg-black/30 px-4 py-1.5 gap-4"
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
-        <Sidebar
-          collapsed={sidebarCollapsed}
-          diffBadges={diffBadges}
-          onOpenProject={handleOpenProject}
-          onRefreshProject={handleRefreshProject}
-          onToggleCollapse={() => {
-            setSidebarCollapsed((current) => !current)
-          }}
-          project={project}
-          refreshing={refreshingProject}
-          onFileSelect={setSelectedFilePath}
-        />
+        <div className="flex items-center gap-4 min-w-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          {/* Sidebar toggle */}
+          <button
+            className="shrink-0 inline-flex h-7 w-7 items-center justify-center text-sentinel-mist transition hover:text-white"
+            onClick={toggleSidebar}
+            title="Toggle sidebar"
+          >
+            <PanelLeft className="h-4 w-4" />
+          </button>
 
-        <div
-          className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden"
-          ref={shellViewportRef}
-        >
-          <header className="shrink-0 border-b border-white/10 bg-sentinel-ink/55 px-8 pb-6 pt-12 backdrop-blur-xl">
-            <div className="flex items-start justify-between gap-6">
-              <div className="space-y-4">
-                <div className="inline-flex items-center gap-2 border border-sentinel-accent/30 bg-sentinel-accent/10 px-3 py-1 text-xs font-medium uppercase tracking-[0.22em] text-sentinel-glow">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Sentinel
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <h1 className="text-3xl font-semibold tracking-tight text-white">Agent Worktree Dashboard</h1>
-                    {project.isGitRepo && (
-                      <div className="inline-flex items-center gap-2 border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-sentinel-mist">
-                        <GitBranch className="h-3.5 w-3.5" />
-                        {project.branch || 'detached HEAD'}
-                      </div>
-                    )}
-                  </div>
-
-                  <p className="max-w-3xl text-sm leading-6 text-sentinel-mist">{projectSubtitle(project)}</p>
-                </div>
-
-                {errorMessage && (
-                  <div className="inline-flex max-w-3xl items-center gap-2 border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
-                    <ArrowRight className="h-4 w-4 rotate-180" />
-                    {errorMessage}
-                  </div>
-                )}
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-sm font-semibold tracking-tight text-white/90 whitespace-nowrap">Sentinel</span>
+            {project.name && (
+              <div className="flex items-center gap-1.5 rounded border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-sentinel-mist truncate">
+                <GitBranch className="h-3 w-3 shrink-0" />
+                <span className="truncate">{project.name} · {project.branch}</span>
               </div>
-
-              <div className="flex shrink-0 items-center gap-3">
-                <button
-                  className="action-button"
-                  onClick={() => {
-                    setSidebarCollapsed((current) => !current)
-                  }}
-                  type="button"
-                >
-                  <PanelLeft className="h-4 w-4" />
-                  {sidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
-                </button>
-
-                <button
-                  className="action-button"
-                  onClick={() => {
-                    void handleRefreshProject()
-                  }}
-                  type="button"
-                >
-                  <RefreshCw className={`h-4 w-4 ${refreshingProject ? 'animate-spin' : ''}`} />
-                  Refresh
-                </button>
-
-                <button
-                  className="inline-flex items-center gap-2 border border-sentinel-accent/30 bg-sentinel-accent px-5 py-3 text-sm font-semibold text-sentinel-ink transition hover:bg-sentinel-glow disabled:cursor-not-allowed disabled:opacity-70"
-                  disabled={creatingSession}
-                  onClick={() => {
-                    void handleCreateSession()
-                  }}
-                  type="button"
-                >
-                  <Plus className="h-4 w-4" />
-                  {creatingSession ? 'Starting Agent...' : 'New Agent'}
-                </button>
-              </div>
-            </div>
-          </header>
-
-          <main className="min-h-0 overflow-hidden px-8 py-6" ref={dashboardViewportRef}>
-            {!hasProject && (
-              <section className="panel flex h-full min-h-0 flex-col items-center justify-center gap-6 border-dashed text-center">
-                <div className="border border-white/10 bg-white/[0.04] p-5">
-                  <FolderOpen className="h-10 w-10 text-sentinel-accent" />
-                </div>
-
-                <div className="space-y-3">
-                  <h2 className="text-2xl font-semibold text-white">Open a repository to begin</h2>
-                  <p className="max-w-xl text-sm leading-6 text-sentinel-mist">
-                    Sentinel creates a temporary Git worktree for each agent shell so parallel edits stay isolated,
-                    inspectable, and easy to merge back later.
-                  </p>
-                </div>
-
-                <button
-                  className="inline-flex items-center gap-2 border border-white/10 bg-white/[0.05] px-5 py-3 text-sm font-medium text-white transition hover:border-sentinel-accent/50 hover:bg-sentinel-accent/10"
-                  onClick={() => {
-                    void handleOpenProject()
-                  }}
-                  type="button"
-                >
-                  <FolderOpen className="h-4 w-4" />
-                  Open Repository
-                </button>
-              </section>
             )}
+          </div>
+        </div>
 
-            {hasProject && sessions.length === 0 && (
-              <section className="panel flex h-full min-h-0 flex-col justify-between overflow-hidden">
-                <div className="space-y-5 p-8">
-                  <div className="inline-flex items-center gap-2 border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.22em] text-sentinel-mist">
-                    <TerminalSquare className="h-3.5 w-3.5" />
-                    Live Tiling
-                  </div>
-                  <div className="space-y-3">
-                    <h2 className="text-2xl font-semibold text-white">No active agents yet</h2>
-                    <p className="max-w-2xl text-sm leading-7 text-sentinel-mist">
-                      Start a tile to create a fresh worktree, boot a PowerShell terminal inside it, and launch any CLI
-                      agent you want. Sentinel keeps the shell live, streams true per-process resource usage, and
-                      surfaces worktree diffs directly in the project tree.
-                    </p>
-                  </div>
-                </div>
+        {/* Center: Global mode toggle */}
+        <div
+          className="flex items-center rounded border border-white/10 bg-white/[0.04] p-0.5 shrink-0"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          <button
+            className={`px-3 py-0.5 text-[10px] font-bold uppercase tracking-widest transition rounded-sm ${
+              globalMode === 'multiplex' ? 'bg-sentinel-accent/20 text-white' : 'text-sentinel-mist hover:text-white'
+            }`}
+            onClick={() => setGlobalMode('multiplex')}
+          >
+            Multiplex
+          </button>
+          <button
+            className={`px-3 py-0.5 text-[10px] font-bold uppercase tracking-widest transition rounded-sm ${
+              globalMode === 'ide' ? 'bg-emerald-500/20 text-emerald-300' : 'text-sentinel-mist hover:text-white'
+            }`}
+            onClick={() => setGlobalMode('ide')}
+          >
+            IDE Mode
+          </button>
+        </div>
 
-                <div className="grid gap-4 border-t border-white/10 bg-white/[0.02] p-8 lg:grid-cols-[1.1fr_0.9fr]">
-                  <div className="space-y-3">
-                    <div className="text-sm font-medium text-white">Suggested session flow</div>
-                    <div className="flex flex-wrap gap-3 text-sm text-sentinel-mist">
-                      <span className="metric-pill">1. Create worktree</span>
-                      <span className="metric-pill">2. Launch agent CLI</span>
-                      <span className="metric-pill">3. Review isolated diff</span>
-                      <span className="metric-pill">4. Merge or discard</span>
+        {/* Right: Actions */}
+        <div className="flex items-center gap-2 shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          <button
+            className="inline-flex h-7 items-center gap-1.5 rounded border border-sentinel-accent/30 bg-sentinel-accent/10 px-3 text-[11px] font-semibold text-sentinel-glow transition hover:bg-sentinel-accent/20 disabled:opacity-40"
+            disabled={!hasProject}
+            onClick={() => void handleCreateSession()}
+          >
+            <Plus className="h-3 w-3" />
+            New Agent
+          </button>
+          <button
+            className="inline-flex h-7 items-center gap-1.5 rounded border border-white/10 bg-white/[0.04] px-2.5 text-[11px] text-sentinel-mist transition hover:text-white disabled:opacity-40"
+            disabled={!hasProject}
+            onClick={() => void handleOpenProject()}
+          >
+            <FolderOpen className="h-3 w-3" />
+          </button>
+        </div>
+      </header>
+
+      {/* ============ BODY ============ */}
+      <div className="flex flex-1 min-h-0 overflow-hidden" ref={shellViewportRef}>
+
+        {/* Resizable panel group: Sidebar | Main */}
+        <PanelGroup direction="horizontal" autoSaveId="sentinel-sidebar">
+          <Panel
+            ref={sidebarPanelRef}
+            defaultSize={18}
+            minSize={0}
+            collapsible
+            collapsedSize={0}
+            onCollapse={() => setSidebarCollapsed(true)}
+            onExpand={() => setSidebarCollapsed(false)}
+            className="transition-[width] duration-200"
+            style={{ overflow: 'hidden' }}
+          >
+            <Sidebar
+              collapsed={false}
+              diffBadges={diffBadges}
+              onOpenProject={handleOpenProject}
+              onRefreshProject={handleRefreshProject}
+              onToggleCollapse={toggleSidebar}
+              project={project}
+              refreshing={refreshingProject}
+              onFileSelect={(path) => { setSelectedFilePath(path); setGlobalMode('ide') }}
+              globalMode={globalMode}
+              onToggleGlobalMode={setGlobalMode}
+            />
+          </Panel>
+
+          <PanelResizeHandle className="relative w-[3px] bg-transparent hover:bg-sentinel-accent/20 active:bg-sentinel-accent/40 transition-colors" />
+
+          <Panel className="flex flex-col min-h-0 min-w-0" defaultSize={82}>
+            {/* Main workspace — both layouts stay mounted, CSS controls visibility */}
+            <div className="flex-1 min-h-0 relative overflow-hidden">
+
+              {/* ---- MULTIPLEX MODE ---- */}
+              <div
+                className={`absolute inset-0 transition-opacity duration-200 ${
+                  globalMode === 'multiplex' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+                }`}
+              >
+                {!hasProject ? (
+                  <div className="flex h-full items-center justify-center">
+                    <div className="max-w-xs text-center p-8 border border-white/10 bg-white/[0.02]">
+                      <FolderOpen className="mx-auto mb-4 h-10 w-10 text-sentinel-mist/40" />
+                      <h2 className="mb-2 text-base font-bold text-white/90">Open a Repository</h2>
+                      <p className="mb-6 text-sm text-sentinel-mist">Select a Git repo to start agent sessions.</p>
+                      <button
+                        className="inline-flex h-9 w-full items-center justify-center gap-2 bg-white text-sm font-bold text-sentinel-ink hover:bg-white/90 transition"
+                        onClick={() => void handleOpenProject()}
+                      >
+                        Open Project
+                      </button>
                     </div>
                   </div>
-
-                  <div className="flex items-center justify-start lg:justify-end">
-                    <button
-                      className="inline-flex items-center gap-2 border border-sentinel-accent/30 bg-sentinel-accent px-5 py-3 text-sm font-semibold text-sentinel-ink transition hover:bg-sentinel-glow"
-                      onClick={() => {
-                        void handleCreateSession()
-                      }}
-                      type="button"
-                    >
-                      <Plus className="h-4 w-4" />
-                      Start First Agent
-                    </button>
+                ) : sessions.length === 0 ? (
+                  <div className="flex h-full items-center justify-center text-center text-sentinel-mist">
+                    <div>
+                      <TerminalSquare className="mx-auto mb-4 h-10 w-10 opacity-30" />
+                      <p className="text-sm">No active agents — click <strong className="text-white">New Agent</strong> to start</p>
+                    </div>
                   </div>
-                </div>
-              </section>
-            )}
-
-            {hasProject && sessions.length > 0 && (
-              <Suspense
-                fallback={
-                  <section className="panel flex h-full min-h-0 items-center justify-center text-sm text-sentinel-mist">
-                    Loading terminal surfaces...
-                  </section>
-                }
-              >
-                {selectedFilePath ? (
-                  <PanelGroup direction="vertical" autoSaveId="sentinel-split-view">
-                    <Panel defaultSize={60} minSize={20} className="min-h-0 relative">
-                      <AgentDashboard
-                        fitNonce={fitNonce}
-                        histories={sessionHistories}
-                        maximizedSessionId={maximizedSessionId}
-                        onClose={handleCloseSession}
-                        onToggleMaximize={(sessionId) => {
-                          setMaximizedSessionId((current) => (current === sessionId ? null : sessionId))
-                        }}
-                        sessions={sessions}
-                      />
-                    </Panel>
-                    <PanelResizeHandle className="h-2 bg-transparent hover:bg-sentinel-accent/20 cursor-row-resize transition-colors" />
-                    <Panel defaultSize={40} minSize={20} className="min-h-0 relative">
-                      <CodePreview 
-                        filePath={selectedFilePath} 
-                        projectPath={project.path}
-                        sessions={sessions} 
-                        onClose={() => setSelectedFilePath(null)} 
-                      />
-                    </Panel>
-                  </PanelGroup>
                 ) : (
-                  <AgentDashboard
-                    fitNonce={fitNonce}
-                    histories={sessionHistories}
-                    maximizedSessionId={maximizedSessionId}
-                    onClose={handleCloseSession}
-                    onToggleMaximize={(sessionId) => {
-                      setMaximizedSessionId((current) => (current === sessionId ? null : sessionId))
-                    }}
-                    sessions={sessions}
-                  />
+                  <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-sentinel-mist">Loading...</div>}>
+                    <AgentDashboard
+                      fitNonce={fitNonce}
+                      histories={sessionHistories}
+                      sessionDiffs={sessionDiffs}
+                      maximizedSessionId={maximizedSessionId}
+                      onClose={handleCloseSession}
+                      onToggleMaximize={(id) => setMaximizedSessionId((c) => c === id ? null : id)}
+                      sessions={sessions}
+                    />
+                  </Suspense>
                 )}
-              </Suspense>
-            )}
-          </main>
+              </div>
 
-          <div className="min-h-0 overflow-hidden" ref={consoleDrawerRef}>
-            <ConsoleDrawer
-              entries={activityLog}
-              open={consoleOpen}
-              onToggleOpen={() => {
-                setConsoleOpen((current) => !current)
-              }}
+              {/* ---- IDE MODE ---- */}
+              <div
+                className={`absolute inset-0 transition-opacity duration-200 ${
+                  globalMode === 'ide' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+                }`}
+              >
+                <PanelGroup direction="vertical" autoSaveId="sentinel-ide-layout">
+                  {/* Top: Monaco Editor */}
+                  <Panel defaultSize={65} minSize={20} className="min-h-0">
+                    <CodePreview
+                      filePath={selectedFilePath}
+                      projectPath={project.path}
+                      sessions={sessions}
+                      onClose={() => setSelectedFilePath(null)}
+                    />
+                  </Panel>
+                  <PanelResizeHandle className="h-[3px] bg-transparent hover:bg-sentinel-accent/20 active:bg-sentinel-accent/40 transition-colors cursor-row-resize" />
+                  {/* Bottom: Terminal tray */}
+                  <Panel defaultSize={35} minSize={10} className="min-h-0">
+                    {ideSession ? (
+                      <SessionTile
+                        session={ideSession}
+                        historyEntries={sessionHistories[ideSession.id] ?? []}
+                        modifiedPaths={sessionDiffs[ideSession.id] ?? []}
+                        isMaximized={false}
+                        onClose={handleCloseSession}
+                        onToggleMaximize={(id) => setMaximizedSessionId((c) => c === id ? null : id)}
+                        mergeWorktree={() => window.sentinel.mergeWorktree(ideSession.id)}
+                        commitWorktree={(msg) => window.sentinel.commitWorktree(ideSession.id, msg)}
+                        discardWorktree={() => window.sentinel.discardWorktree(ideSession.id)}
+                        fitNonce={fitNonce}
+                      />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-sm text-sentinel-mist bg-[#060a0f] border-t border-white/10">
+                        No active agents
+                      </div>
+                    )}
+                  </Panel>
+                </PanelGroup>
+              </div>
+            </div>
+
+            {/* ---- STATUS BAR ---- */}
+            <StatusBar
+              consoleOpen={consoleOpen}
+              onToggleConsole={() => setConsoleOpen((v) => !v)}
+              summary={workspaceSummary}
             />
-          </div>
-
-          <StatusBar
-            consoleOpen={consoleOpen}
-            onToggleConsole={() => {
-              setConsoleOpen((current) => !current)
-            }}
-            summary={summary}
-          />
-        </div>
+          </Panel>
+        </PanelGroup>
       </div>
 
-      <GlobalActionBar 
-        isOpen={globalActionBarOpen} 
-        onClose={() => setGlobalActionBarOpen(false)} 
-        actions={globalActions} 
+      {/* ============ CONSOLE DRAWER ============ */}
+      <div
+        className={`fixed inset-x-0 bottom-0 z-40 flex h-[36vh] flex-col overflow-hidden bg-[#060c14]/98 shadow-2xl backdrop-blur-2xl transition-transform duration-300 ease-in-out ${
+          consoleOpen ? 'translate-y-0 border-t border-sentinel-accent/20' : 'translate-y-full'
+        }`}
+      >
+        <ConsoleDrawer
+          entries={activityLog}
+          open={consoleOpen}
+          onToggleOpen={() => setConsoleOpen((v) => !v)}
+        />
+      </div>
+
+      {/* ============ GLOBAL ACTION BAR ============ */}
+      <GlobalActionBar
+        isOpen={globalActionBarOpen}
+        onClose={() => setGlobalActionBarOpen(false)}
+        actions={globalActions}
       />
     </div>
   )

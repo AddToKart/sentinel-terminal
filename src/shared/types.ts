@@ -123,6 +123,8 @@ export interface SentinelApi {
   readFile: (filePath: string) => Promise<string>
   readFileDiff: (sessionId: string, filePath: string) => Promise<string>
   mergeWorktree: (sessionId: string) => Promise<void>
+  commitWorktree: (sessionId: string, message: string) => Promise<void>
+  discardWorktree: (sessionId: string) => Promise<void>
   revealInFileExplorer: (filePath: string) => Promise<void>
   openInSystemEditor: (filePath: string) => Promise<void>
   onSessionOutput: (listener: (event: SessionOutputEvent) => void) => () => void

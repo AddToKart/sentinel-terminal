@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react'
-import { GripHorizontal, GripVertical, LayoutGrid, Sidebar } from 'lucide-react'
+import { GripHorizontal, GripVertical, LayoutGrid, Sidebar as SidebarIcon } from 'lucide-react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 
 import type { SessionCommandEntry, SessionSummary } from '@shared/types'
@@ -9,6 +9,7 @@ import { SessionTile } from './SessionTile'
 interface AgentDashboardProps {
   sessions: SessionSummary[]
   histories: Record<string, SessionCommandEntry[]>
+  sessionDiffs: Record<string, string[]>
   onClose: (sessionId: string) => Promise<void>
   onToggleMaximize: (sessionId: string) => void
   maximizedSessionId: string | null
@@ -58,7 +59,7 @@ function DashboardResizeHandle({ direction }: { direction: 'horizontal' | 'verti
           : 'dashboard-handle dashboard-handle-vertical'
       }
     >
-      <div className="dashboard-handle-bar">
+      <div className="dashboard-handle-bar z-50 relative pointer-events-none">
         {isHorizontal ? <GripHorizontal className="h-3.5 w-3.5" /> : <GripVertical className="h-3.5 w-3.5" />}
       </div>
     </PanelResizeHandle>
@@ -68,6 +69,7 @@ function DashboardResizeHandle({ direction }: { direction: 'horizontal' | 'verti
 export function AgentDashboard({
   sessions,
   histories,
+  sessionDiffs,
   onClose,
   onToggleMaximize,
   maximizedSessionId,
@@ -91,11 +93,14 @@ export function AgentDashboard({
           <SessionTile
             fitNonce={fitNonce}
             historyEntries={histories[session.id] ?? []}
+            modifiedPaths={sessionDiffs[session.id] || []}
             isMaximized
             onClose={onClose}
             onToggleMaximize={onToggleMaximize}
             session={session}
             mergeWorktree={() => window.sentinel.mergeWorktree(session.id)}
+            commitWorktree={(msg) => window.sentinel.commitWorktree(session.id, msg)}
+            discardWorktree={() => window.sentinel.discardWorktree(session.id)}
           />
         </div>
       </div>
@@ -103,7 +108,7 @@ export function AgentDashboard({
   }
 
   const renderLayoutToggle = () => (
-    <div className="absolute top-4 right-4 z-50 flex items-center gap-1 rounded border border-white/10 bg-black/40 p-1 backdrop-blur">
+    <div className="absolute top-4 right-4 z-50 flex items-center gap-1 rounded border border-white/10 bg-black/60 p-1 backdrop-blur shadow-xl">
       <button
         className={`rounded p-1.5 text-xs transition ${
           layoutMode === 'grid' ? 'bg-sentinel-accent/20 text-white' : 'text-sentinel-mist hover:text-white'
@@ -122,7 +127,7 @@ export function AgentDashboard({
         title="Master-Stack Layout"
         type="button"
       >
-        <Sidebar className="h-3.5 w-3.5" />
+        <SidebarIcon className="h-3.5 w-3.5" />
       </button>
     </div>
   )
@@ -146,11 +151,14 @@ export function AgentDashboard({
               <SessionTile
                 fitNonce={fitNonce}
                 historyEntries={histories[masterSession.id] ?? []}
+                modifiedPaths={sessionDiffs[masterSession.id] || []}
                 isMaximized={false}
                 onClose={onClose}
                 onToggleMaximize={onToggleMaximize}
                 session={masterSession}
                 mergeWorktree={() => window.sentinel.mergeWorktree(masterSession.id)}
+                commitWorktree={(msg) => window.sentinel.commitWorktree(masterSession.id, msg)}
+                discardWorktree={() => window.sentinel.discardWorktree(masterSession.id)}
               />
             </div>
           </Panel>
@@ -169,11 +177,14 @@ export function AgentDashboard({
                       <SessionTile
                         fitNonce={fitNonce}
                         historyEntries={histories[session.id] ?? []}
+                        modifiedPaths={sessionDiffs[session.id] || []}
                         isMaximized={false}
                         onClose={onClose}
                         onToggleMaximize={onToggleMaximize}
                         session={session}
                         mergeWorktree={() => window.sentinel.mergeWorktree(session.id)}
+                        commitWorktree={(msg) => window.sentinel.commitWorktree(session.id, msg)}
+                        discardWorktree={() => window.sentinel.discardWorktree(session.id)}
                       />
                     </div>
                   </Panel>
@@ -223,11 +234,14 @@ export function AgentDashboard({
                           <SessionTile
                             fitNonce={fitNonce}
                             historyEntries={histories[session.id] ?? []}
+                            modifiedPaths={sessionDiffs[session.id] || []}
                             isMaximized={false}
                             onClose={onClose}
                             onToggleMaximize={onToggleMaximize}
                             session={session}
                             mergeWorktree={() => window.sentinel.mergeWorktree(session.id)}
+                            commitWorktree={(msg) => window.sentinel.commitWorktree(session.id, msg)}
+                            discardWorktree={() => window.sentinel.discardWorktree(session.id)}
                           />
                         </div>
                       </Panel>

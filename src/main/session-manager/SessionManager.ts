@@ -284,6 +284,28 @@ export class SessionManager extends EventEmitter {
     await this.runGitCommand(this.projectState.path, ['merge', record.summary.branchName])
   }
 
+  async commitWorktree(sessionId: string, message: string): Promise<void> {
+    const record = this.sessionRecords.get(sessionId)
+    if (!record || !this.projectState.path) {
+      throw new Error('Session or project not found.')
+    }
+    
+    await this.runGitCommand(record.summary.worktreePath, ['add', '.'])
+    await this.runGitCommand(record.summary.worktreePath, ['commit', '-m', message])
+    this.scheduleRuntimeRefresh()
+  }
+
+  async discardWorktree(sessionId: string): Promise<void> {
+    const record = this.sessionRecords.get(sessionId)
+    if (!record || !this.projectState.path) {
+      throw new Error('Session or project not found.')
+    }
+
+    await this.runGitCommand(record.summary.worktreePath, ['reset', '--hard'])
+    await this.runGitCommand(record.summary.worktreePath, ['clean', '-fd'])
+    this.scheduleRuntimeRefresh()
+  }
+
   async resizeSession(sessionId: string, cols: number, rows: number): Promise<void> {
     const record = this.sessionRecords.get(sessionId)
     if (!record || cols <= 0 || rows <= 0) {

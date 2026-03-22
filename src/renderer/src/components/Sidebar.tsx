@@ -24,6 +24,8 @@ interface SidebarProps {
   onRefreshProject: () => void
   onToggleCollapse: () => void
   onFileSelect: (path: string) => void
+  globalMode: 'multiplex' | 'ide'
+  onToggleGlobalMode: (mode: 'multiplex' | 'ide') => void
 }
 
 interface FileContextMenuState {
@@ -167,7 +169,9 @@ export function Sidebar({
   onOpenProject,
   onRefreshProject,
   onToggleCollapse,
-  onFileSelect
+  onFileSelect,
+  globalMode,
+  onToggleGlobalMode
 }: SidebarProps): JSX.Element {
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null)
@@ -392,6 +396,25 @@ export function Sidebar({
             <span>Open in System Editor</span>
             <span className="font-mono text-[11px] text-sentinel-mist">system</span>
           </button>
+        </div>
+      )}
+
+      {!collapsed && (
+        <div className="shrink-0 p-4 border-t border-white/10 flex items-center bg-black/20">
+          <div className="flex w-full bg-white/[0.04] p-1 border border-white/10">
+            <button
+              className={`flex-1 text-[10px] font-bold uppercase tracking-widest py-1.5 transition ${globalMode === 'multiplex' ? 'bg-sentinel-accent/20 text-white' : 'text-sentinel-mist hover:text-white'}`}
+              onClick={() => onToggleGlobalMode('multiplex')}
+            >
+              Multiplex
+            </button>
+            <button
+              className={`flex-1 text-[10px] font-bold uppercase tracking-widest py-1.5 transition ${globalMode === 'ide' ? 'bg-emerald-500/20 text-white' : 'text-sentinel-mist hover:text-white'}`}
+              onClick={() => onToggleGlobalMode('ide')}
+            >
+              IDE Mode
+            </button>
+          </div>
         </div>
       )}
     </aside>
