@@ -1,0 +1,191 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family: 'Segoe UI Variable', 'IBM Plex Sans', 'Segoe UI', sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #03070c;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  color: #eef5fb;
+  background:
+    radial-gradient(circle at top left, rgba(109, 169, 255, 0.18), transparent 32%),
+    radial-gradient(circle at 86% 10%, rgba(70, 214, 182, 0.14), transparent 26%),
+    linear-gradient(180deg, #071017 0%, #03070c 100%);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: linear-gradient(180deg, rgba(255, 255, 255, 0.65), transparent);
+  opacity: 0.35;
+}
+
+.app-shell {
+  width: 100%;
+  height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(70, 214, 182, 0.3);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(143, 165, 184, 0.32);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(143, 165, 184, 0.52);
+  background-clip: padding-box;
+}
+
+.xterm {
+  height: 100%;
+  max-height: 100%;
+  padding: 0.75rem 0.9rem;
+}
+
+.xterm .xterm-viewport {
+  background: transparent !important;
+  overflow-y: auto !important;
+}
+
+.xterm .xterm-screen canvas {
+  filter: saturate(1.02);
+}
+
+.terminal-host,
+.terminal-host > .xterm {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dashboard-handle {
+  position: relative;
+  z-index: 20;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(143, 165, 184, 0.72);
+  transition:
+    color 160ms ease,
+    background-color 160ms ease,
+    opacity 160ms ease;
+}
+
+.dashboard-handle[data-resize-handle-active='pointer'],
+.dashboard-handle:hover {
+  color: rgba(167, 255, 239, 0.96);
+}
+
+.dashboard-handle-horizontal {
+  height: 14px;
+  cursor: row-resize;
+}
+
+.dashboard-handle-vertical {
+  width: 14px;
+  cursor: col-resize;
+}
+
+.dashboard-handle::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.025);
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.dashboard-handle[data-resize-handle-active='pointer']::before,
+.dashboard-handle:hover::before {
+  opacity: 1;
+}
+
+.dashboard-handle-bar {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(6, 12, 18, 0.9);
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.24);
+}
+
+.dashboard-handle-horizontal .dashboard-handle-bar {
+  padding: 0.15rem 0.45rem;
+}
+
+.dashboard-handle-vertical .dashboard-handle-bar {
+  padding: 0.45rem 0.15rem;
+}
+
+@layer components {
+  .panel {
+    @apply rounded-none border border-white/10 bg-white/[0.045] shadow-terminal backdrop-blur-xl;
+  }
+
+  .panel-muted {
+    @apply rounded-none border border-white/10 bg-white/[0.035] backdrop-blur-xl;
+  }
+
+  .metric-pill {
+    @apply inline-flex items-center gap-2 rounded-none border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-sentinel-mist;
+  }
+
+  .metric-row {
+    @apply inline-flex items-center gap-2 rounded-none border border-white/10 bg-white/[0.04] px-3 py-1.5;
+  }
+
+  .action-button {
+    @apply inline-flex items-center gap-2 rounded-none border border-white/10 bg-white/[0.05] px-4 py-2.5 text-sm font-medium text-white transition hover:border-sentinel-accent/40 hover:bg-sentinel-accent/10;
+  }
+}
