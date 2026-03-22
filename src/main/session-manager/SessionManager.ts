@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
@@ -7,14 +6,11 @@ import path from 'node:path'
 import { dialog } from 'electron'
 import * as nodePty from 'node-pty'
 import type { IPty } from 'node-pty'
-import pidusage, { clear as clearPidusage } from 'pidusage'
 
 import type {
   ActivityLogEntry,
   BootstrapPayload,
   CreateSessionInput,
-  ProcessMetrics,
-  ProjectNode,
   ProjectState,
   SessionCommandEntry,
   SessionDiffUpdate,
@@ -24,270 +20,27 @@ import type {
   WorkspaceSummary
 } from '@shared/types'
 
-const TREE_DEPTH = 3
-const TREE_ENTRY_LIMIT = 28
-const METRIC_INTERVAL_MS = 1000
-const RUN_COMMAND_TIMEOUT_MS = 30_000
-const CLOSE_TIMEOUT_MS = 4_000
-
-const IGNORED_DIRECTORIES = new Set([
-  '.git',
-  '.next',
-  '.turbo',
-  '.venv',
-  'node_modules',
-  'dist',
-  'out',
-  'build',
-  'coverage',
-  '__pycache__'
-])
-
-interface ProcessTreeSnapshot {
-  rootId: number
-  cpuTotalSeconds: number
-  workingSetBytes: number
-  handleCount: number
-  threadCount: number
-  processCount: number
-  processIds: number[]
-}
-
-interface RawProcessTreeSnapshot {
-  RootId: number
-  CpuTotalSeconds: number
-  WorkingSetBytes: number
-  HandleCount: number
-  ThreadCount: number
-  ProcessCount: number
-  ProcessIds: number[]
-}
-
-interface SessionRecord {
-  summary: SessionSummary
-  terminal: IPty
-  closePromise: Promise<void>
-  resolveClosed: () => void
-  closeRequested: boolean
-  finalized: boolean
-  commandBuffer: string
-  history: SessionCommandEntry[]
-  modifiedPaths: string[]
-  finalizePromise?: Promise<void>
-}
-
-type ManagerEvents = {
-  'session-output': [{ sessionId: string; data: string }]
-  'session-state': [SessionSummary]
-  'session-metrics': [SessionMetricsUpdate]
-  'session-history': [SessionHistoryUpdate]
-  'session-diff': [SessionDiffUpdate]
-  'workspace-state': [WorkspaceSummary]
-  'activity-log': [ActivityLogEntry]
-}
-
-function emptyMetrics(): ProcessMetrics {
-  return {
-    cpuPercent: 0,
-    memoryMb: 0,
-    threadCount: 0,
-    handleCount: 0,
-    processCount: 0
-  }
-}
-
-function createEmptyProject(): ProjectState {
-  return {
-    isGitRepo: false,
-    tree: []
-  }
-}
-
-function round(value: number, decimals = 1): number {
-  const factor = 10 ** decimals
-  return Math.round(value * factor) / factor
-}
-
-function sanitizeSegment(input: string): string {
-  return input
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '') || 'agent'
-}
-
-function createToken(): string {
-  return Math.random().toString(36).slice(2, 8)
-}
-
-function createTimestamp(): string {
-  const now = new Date()
-  const parts = [
-    now.getFullYear().toString(),
-    String(now.getMonth() + 1).padStart(2, '0'),
-    String(now.getDate()).padStart(2, '0'),
-    String(now.getHours()).padStart(2, '0'),
-    String(now.getMinutes()).padStart(2, '0'),
-    String(now.getSeconds()).padStart(2, '0')
-  ]
-
-  return parts.join('')
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
-
-async function runCommand(file: string, args: string[], cwd?: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      file,
-      args,
-      {
-        cwd,
-        windowsHide: true,
-        timeout: RUN_COMMAND_TIMEOUT_MS
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error(stderr.trim() || stdout.trim() || error.message))
-          return
-        }
-
-        resolve(stdout.trim())
-      }
-    )
-  })
-}
-
-async function runPowerShell(script: string): Promise<string> {
-  return runCommand(
-    'powershell.exe',
-    ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script]
-  )
-}
-
-async function pathExists(candidate: string): Promise<boolean> {
-  try {
-    await fs.access(candidate)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function buildProjectTree(rootPath: string, depth = TREE_DEPTH): Promise<ProjectNode[]> {
-  let entries = await fs.readdir(rootPath, { withFileTypes: true })
-  entries = entries
-    .filter((entry) => {
-      if (entry.name.startsWith('.')) {
-        return entry.name === '.env' || entry.name === '.github' || !IGNORED_DIRECTORIES.has(entry.name)
-      }
-
-      return !IGNORED_DIRECTORIES.has(entry.name)
-    })
-    .sort((left, right) => {
-      if (left.isDirectory() !== right.isDirectory()) {
-        return left.isDirectory() ? -1 : 1
-      }
-
-      return left.name.localeCompare(right.name)
-    })
-    .slice(0, TREE_ENTRY_LIMIT)
-
-  const nodes = await Promise.all(
-    entries.map(async (entry) => {
-      const absolutePath = path.join(rootPath, entry.name)
-
-      if (entry.isDirectory() && depth > 0) {
-        try {
-          const children = await buildProjectTree(absolutePath, depth - 1)
-          return {
-            name: entry.name,
-            path: absolutePath,
-            kind: 'directory' as const,
-            children
-          }
-        } catch {
-          return {
-            name: entry.name,
-            path: absolutePath,
-            kind: 'directory' as const
-          }
-        }
-      }
-
-      return {
-        name: entry.name,
-        path: absolutePath,
-        kind: entry.isDirectory() ? ('directory' as const) : ('file' as const)
-      }
-    })
-  )
-
-  return nodes
-}
-
-function normalizeSessionPaths(projectRoot: string, relativePaths: string[]): string[] {
-  return [...new Set(
-    relativePaths
-      .map((relativePath) => relativePath.trim())
-      .filter(Boolean)
-      .map((relativePath) => path.normalize(path.resolve(projectRoot, relativePath)))
-  )].sort((left, right) => left.localeCompare(right))
-}
-
-function arrayEquals(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) {
-    return false
-  }
-
-  return left.every((value, index) => value === right[index])
-}
-
-function createHistoryEntry(command: string, source: SessionCommandEntry['source']): SessionCommandEntry {
-  return {
-    id: `${createTimestamp()}-${createToken()}`,
-    command,
-    timestamp: Date.now(),
-    source
-  }
-}
-
-function parseGitStatusOutput(raw: string): string[] {
-  const entries = raw.split('\0').filter(Boolean)
-  const modifiedPaths: string[] = []
-
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index]
-    if (entry.length < 4) {
-      continue
-    }
-
-    const status = entry.slice(0, 2)
-    const primaryPath = entry.slice(3).trim()
-
-    if (!primaryPath) {
-      continue
-    }
-
-    if (status.includes('R') || status.includes('C')) {
-      const renamedPath = entries[index + 1]?.trim()
-      if (renamedPath) {
-        modifiedPaths.push(renamedPath)
-        index += 1
-        continue
-      }
-    }
-
-    modifiedPaths.push(primaryPath)
-  }
-
-  return [...new Set(modifiedPaths)]
-}
+import { CLOSE_TIMEOUT_MS, METRIC_INTERVAL_MS } from './constants'
+import { pathExists, runCommand, runPowerShell } from './commands'
+import {
+  arrayEquals,
+  createEmptyProject,
+  createHistoryEntry,
+  createTimestamp,
+  createToken,
+  delay,
+  emptyMetrics,
+  round,
+  sanitizeSegment
+} from './helpers'
+import { buildProjectTree } from './project-tree'
+import {
+  clearProcessUsageCache,
+  collectPidUsage,
+  collectProcessTreeSnapshots,
+  collectWorktreeDiffs
+} from './runtime-monitor'
+import type { ManagerEvents, ProcessTreeSnapshot, SessionRecord } from './types'
 
 export class SessionManager extends EventEmitter {
   private readonly sessionRecords = new Map<string, SessionRecord>()
@@ -521,7 +274,11 @@ export class SessionManager extends EventEmitter {
     if (!record.closeRequested) {
       record.closeRequested = true
 
-      if (record.summary.status === 'starting' || record.summary.status === 'ready' || record.summary.status === 'error') {
+      if (
+        record.summary.status === 'starting' ||
+        record.summary.status === 'ready' ||
+        record.summary.status === 'error'
+      ) {
         record.summary.status = 'closing'
         record.summary.error = undefined
         record.modifiedPaths = []
@@ -555,7 +312,7 @@ export class SessionManager extends EventEmitter {
 
   dispose(): void {
     clearInterval(this.metricsTimer)
-    clearPidusage()
+    clearProcessUsageCache()
 
     for (const record of this.sessionRecords.values()) {
       record.closeRequested = true
@@ -759,8 +516,7 @@ export class SessionManager extends EventEmitter {
 
       const closedCleanly = exitCode === 0 || exitCode === null
       record.summary.exitCode = exitCode
-      record.summary.status =
-        record.closeRequested || closedCleanly ? 'closed' : 'error'
+      record.summary.status = record.closeRequested || closedCleanly ? 'closed' : 'error'
       record.summary.metrics = emptyMetrics()
 
       if (options?.error) {
@@ -911,7 +667,10 @@ export class SessionManager extends EventEmitter {
 
   private async refreshRuntimeState(): Promise<void> {
     const activeRecords = [...this.sessionRecords.values()].filter(
-      (record) => record.summary.status === 'starting' || record.summary.status === 'ready' || record.summary.status === 'closing'
+      (record) =>
+        record.summary.status === 'starting' ||
+        record.summary.status === 'ready' ||
+        record.summary.status === 'closing'
     )
 
     if (activeRecords.length === 0) {
@@ -924,8 +683,10 @@ export class SessionManager extends EventEmitter {
       .filter((pid): pid is number => typeof pid === 'number')
 
     const [snapshotMap, diffMap] = await Promise.all([
-      rootIds.length > 0 ? this.collectProcessTreeSnapshots(rootIds) : Promise.resolve(new Map<number, ProcessTreeSnapshot>()),
-      this.collectWorktreeDiffs(
+      rootIds.length > 0
+        ? collectProcessTreeSnapshots(rootIds)
+        : Promise.resolve(new Map<number, ProcessTreeSnapshot>()),
+      collectWorktreeDiffs(
         activeRecords.filter(
           (record) => record.summary.status === 'starting' || record.summary.status === 'ready'
         )
@@ -933,7 +694,7 @@ export class SessionManager extends EventEmitter {
     ])
     const usageMap =
       snapshotMap.size > 0
-        ? await this.collectPidUsage([...snapshotMap.values()].flatMap((snapshot) => snapshot.processIds))
+        ? await collectPidUsage([...snapshotMap.values()].flatMap((snapshot) => snapshot.processIds))
         : new Map<number, { cpu: number; memory: number }>()
     const sampledAt = Date.now()
 
@@ -982,147 +743,12 @@ export class SessionManager extends EventEmitter {
     this.emitWorkspaceState()
   }
 
-  private async collectWorktreeDiffs(records: SessionRecord[]): Promise<Map<string, string[]>> {
-    const updates = await Promise.all(
-      records.map(async (record) => {
-        if (!(await pathExists(record.summary.worktreePath))) {
-          return [record.summary.id, [] as string[]] as const
-        }
-
-        try {
-          const raw = await runCommand(
-            'git',
-            ['-C', record.summary.worktreePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
-            record.summary.worktreePath
-          )
-
-          return [
-            record.summary.id,
-            normalizeSessionPaths(record.summary.projectRoot, parseGitStatusOutput(raw))
-          ] as const
-        } catch {
-          return [record.summary.id, [] as string[]] as const
-        }
-      })
-    )
-
-    return new Map(updates)
-  }
-
-  private async collectPidUsage(
-    processIds: number[]
-  ): Promise<Map<number, { cpu: number; memory: number }>> {
-    const uniquePids = [...new Set(processIds.filter((pid) => Number.isInteger(pid) && pid > 0))]
-    if (uniquePids.length === 0) {
-      return new Map()
-    }
-
-    try {
-      const usage = await pidusage(uniquePids)
-      const usageMap = new Map<number, { cpu: number; memory: number }>()
-
-      for (const processId of uniquePids) {
-        const stats = usage[String(processId)] ?? usage[processId]
-        if (!stats) {
-          continue
-        }
-
-        usageMap.set(processId, {
-          cpu: typeof stats.cpu === 'number' ? stats.cpu : 0,
-          memory: typeof stats.memory === 'number' ? stats.memory : 0
-        })
-      }
-
-      return usageMap
-    } catch {
-      return new Map()
-    }
-  }
-
-  private async collectProcessTreeSnapshots(rootIds: number[]): Promise<Map<number, ProcessTreeSnapshot>> {
-    const script = [
-      "$ErrorActionPreference='SilentlyContinue'",
-      `$rootIds=@(${rootIds.join(',')})`,
-      '$children=@{}',
-      'Get-CimInstance Win32_Process | ForEach-Object {',
-      "  $parent=[string]$_.ParentProcessId",
-      '  if (-not $children.ContainsKey($parent)) { $children[$parent]=New-Object System.Collections.Generic.List[int] }',
-      '  $children[$parent].Add([int]$_.ProcessId) | Out-Null',
-      '}',
-      '$result=@()',
-      'foreach ($rootId in $rootIds) {',
-      "  $queue=New-Object 'System.Collections.Generic.Queue[int]'",
-      "  $seen=New-Object 'System.Collections.Generic.HashSet[int]'",
-      '  $queue.Enqueue([int]$rootId)',
-      '  while ($queue.Count -gt 0) {',
-      '    $current=$queue.Dequeue()',
-      '    if ($seen.Add($current)) {',
-      '      $key=[string]$current',
-      '      if ($children.ContainsKey($key)) {',
-      '        foreach ($child in $children[$key]) { $queue.Enqueue([int]$child) }',
-      '      }',
-      '    }',
-      '  }',
-      '  $ids=@($seen)',
-      '  $stats=@()',
-      '  if ($ids.Count -gt 0) { $stats=Get-Process -Id $ids -ErrorAction SilentlyContinue }',
-      '  $cpu=0.0',
-      '  $workingSet=0',
-      '  $handles=0',
-      '  $threads=0',
-      '  foreach ($proc in $stats) {',
-      '    if ($null -ne $proc.CPU) { $cpu += [double]$proc.CPU }',
-      '    if ($null -ne $proc.WorkingSet64) { $workingSet += [int64]$proc.WorkingSet64 }',
-      '    if ($null -ne $proc.HandleCount) { $handles += [int]$proc.HandleCount }',
-      '    if ($null -ne $proc.Threads) { $threads += $proc.Threads.Count }',
-      '  }',
-      '  $result += [pscustomobject]@{',
-      '    RootId=[int]$rootId',
-      '    CpuTotalSeconds=[double]$cpu',
-      '    WorkingSetBytes=[int64]$workingSet',
-      '    HandleCount=[int]$handles',
-      '    ThreadCount=[int]$threads',
-      '    ProcessCount=[int]$ids.Count',
-      '    ProcessIds=@($ids)',
-      '  }',
-      '}',
-      '$result | ConvertTo-Json -Compress'
-    ].join('; ')
-
-    let raw = ''
-
-    try {
-      raw = await runPowerShell(script)
-    } catch {
-      return new Map()
-    }
-
-    if (!raw) {
-      return new Map()
-    }
-
-    const parsed = JSON.parse(raw) as RawProcessTreeSnapshot | RawProcessTreeSnapshot[]
-    const snapshots = Array.isArray(parsed) ? parsed : [parsed]
-
-    return new Map(
-      snapshots.map((snapshot) => [
-        snapshot.RootId,
-        {
-          rootId: snapshot.RootId,
-          cpuTotalSeconds: snapshot.CpuTotalSeconds,
-          workingSetBytes: snapshot.WorkingSetBytes,
-          handleCount: snapshot.HandleCount,
-          threadCount: snapshot.ThreadCount,
-          processCount: snapshot.ProcessCount,
-          processIds: Array.isArray(snapshot.ProcessIds) ? snapshot.ProcessIds : []
-        }
-      ])
-    )
-  }
-
   private emitWorkspaceState(): void {
     const activeSessions = [...this.sessionRecords.values()].filter(
-      (record) => record.summary.status === 'starting' || record.summary.status === 'ready' || record.summary.status === 'closing'
+      (record) =>
+        record.summary.status === 'starting' ||
+        record.summary.status === 'ready' ||
+        record.summary.status === 'closing'
     )
 
     this.workspaceSummary = {
@@ -1135,7 +761,10 @@ export class SessionManager extends EventEmitter {
         activeSessions.reduce((total, record) => total + record.summary.metrics.memoryMb, 0),
         1
       ),
-      totalProcesses: activeSessions.reduce((total, record) => total + record.summary.metrics.processCount, 0),
+      totalProcesses: activeSessions.reduce(
+        (total, record) => total + record.summary.metrics.processCount,
+        0
+      ),
       lastUpdated: Date.now(),
       projectPath: this.projectState.path,
       projectName: this.projectState.name,

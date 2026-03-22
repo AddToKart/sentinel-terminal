@@ -1,0 +1,54 @@
+import type { IPty } from 'node-pty'
+
+import type {
+  ActivityLogEntry,
+  SessionCommandEntry,
+  SessionDiffUpdate,
+  SessionHistoryUpdate,
+  SessionMetricsUpdate,
+  SessionSummary,
+  WorkspaceSummary
+} from '@shared/types'
+
+export interface ProcessTreeSnapshot {
+  rootId: number
+  cpuTotalSeconds: number
+  workingSetBytes: number
+  handleCount: number
+  threadCount: number
+  processCount: number
+  processIds: number[]
+}
+
+export interface RawProcessTreeSnapshot {
+  RootId: number
+  CpuTotalSeconds: number
+  WorkingSetBytes: number
+  HandleCount: number
+  ThreadCount: number
+  ProcessCount: number
+  ProcessIds: number[]
+}
+
+export interface SessionRecord {
+  summary: SessionSummary
+  terminal: IPty
+  closePromise: Promise<void>
+  resolveClosed: () => void
+  closeRequested: boolean
+  finalized: boolean
+  commandBuffer: string
+  history: SessionCommandEntry[]
+  modifiedPaths: string[]
+  finalizePromise?: Promise<void>
+}
+
+export type ManagerEvents = {
+  'session-output': [{ sessionId: string; data: string }]
+  'session-state': [SessionSummary]
+  'session-metrics': [SessionMetricsUpdate]
+  'session-history': [SessionHistoryUpdate]
+  'session-diff': [SessionDiffUpdate]
+  'workspace-state': [WorkspaceSummary]
+  'activity-log': [ActivityLogEntry]
+}
