@@ -27,6 +27,8 @@ const api: SentinelApi = {
   bootstrap: () => ipcRenderer.invoke('sentinel:bootstrap') as Promise<BootstrapPayload>,
   selectProject: () => ipcRenderer.invoke('sentinel:select-project') as Promise<ProjectState>,
   refreshProject: () => ipcRenderer.invoke('sentinel:refresh-project') as Promise<ProjectState>,
+  setDefaultSessionStrategy: (strategy) =>
+    ipcRenderer.invoke('sentinel:set-default-session-strategy', strategy),
   createSession: (input?: CreateSessionInput) =>
     ipcRenderer.invoke('sentinel:create-session', input) as Promise<SessionSummary>,
   closeSession: (sessionId: string) => ipcRenderer.invoke('sentinel:close-session', sessionId) as Promise<void>,
@@ -38,12 +40,14 @@ const api: SentinelApi = {
     ipcRenderer.invoke('sentinel:read-file', filePath) as Promise<string>,
   readFileDiff: (sessionId: string, filePath: string) =>
     ipcRenderer.invoke('sentinel:read-file-diff', { sessionId, filePath }) as Promise<string>,
-  mergeWorktree: (sessionId: string) =>
-    ipcRenderer.invoke('sentinel:merge-worktree', sessionId) as Promise<void>,
-  commitWorktree: (sessionId: string, message: string) =>
-    ipcRenderer.invoke('sentinel:commit-worktree', { sessionId, message }) as Promise<void>,
-  discardWorktree: (sessionId: string) =>
-    ipcRenderer.invoke('sentinel:discard-worktree', sessionId) as Promise<void>,
+  writeSessionFile: (sessionId: string, relativePath: string, content: string) =>
+    ipcRenderer.invoke('sentinel:write-session-file', { sessionId, relativePath, content }) as Promise<void>,
+  applySession: (sessionId: string) =>
+    ipcRenderer.invoke('sentinel:apply-session', sessionId),
+  commitSession: (sessionId: string, message: string) =>
+    ipcRenderer.invoke('sentinel:commit-session', { sessionId, message }) as Promise<void>,
+  discardSessionChanges: (sessionId: string) =>
+    ipcRenderer.invoke('sentinel:discard-session-changes', sessionId) as Promise<void>,
   revealInFileExplorer: (filePath: string) =>
     ipcRenderer.invoke('sentinel:reveal-in-file-explorer', filePath) as Promise<void>,
   openInSystemEditor: (filePath: string) =>

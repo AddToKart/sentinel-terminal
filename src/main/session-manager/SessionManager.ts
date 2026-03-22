@@ -12,11 +12,14 @@ import type {
   BootstrapPayload,
   CreateSessionInput,
   ProjectState,
+  SessionApplyResult,
   SessionCommandEntry,
   SessionDiffUpdate,
   SessionHistoryUpdate,
   SessionMetricsUpdate,
   SessionSummary,
+  SessionWorkspaceStrategy,
+  WorkspacePreferences,
   WorkspaceSummary
 } from '@shared/types'
 
@@ -30,17 +33,40 @@ import {
   createToken,
   delay,
   emptyMetrics,
+  normalizeRelativePath,
   round,
   sanitizeSegment
 } from './helpers'
 import { buildProjectTree } from './project-tree'
 import {
+  applySandboxWorkspace,
+  createSandboxWorkspace,
+  discardSandboxWorkspace,
+  refreshSandboxWorkspaceDiffs,
+  writeSandboxFile
+} from './sandbox-workspace'
+import {
   clearProcessUsageCache,
   collectPidUsage,
   collectProcessTreeSnapshots,
-  collectWorktreeDiffs
+  collectWorkspaceDiffs
 } from './runtime-monitor'
 import type { ManagerEvents, ProcessTreeSnapshot, SessionRecord } from './types'
+
+function resolveWorkspaceFilePath(workspacePath: string, relativePath: string): string {
+  const normalizedRelativePath = normalizeRelativePath(relativePath)
+  const resolvedPath = path.resolve(workspacePath, normalizedRelativePath)
+  const normalizedWorkspacePath = path.resolve(workspacePath)
+  const rootPrefix = normalizedWorkspacePath.endsWith(path.sep)
+    ? normalizedWorkspacePath
+    : `${normalizedWorkspacePath}${path.sep}`
+
+  if (resolvedPath !== normalizedWorkspacePath && !resolvedPath.startsWith(rootPrefix)) {
+    throw new Error(`Refusing to access a path outside the session workspace: ${relativePath}`)
+  }
+
+  return resolvedPath
+}
 
 export class SessionManager extends EventEmitter {
   private readonly sessionRecords = new Map<string, SessionRecord>()
@@ -49,12 +75,16 @@ export class SessionManager extends EventEmitter {
   private readonly activityLog: ActivityLogEntry[] = []
   private refreshInFlight = false
   private projectState: ProjectState = createEmptyProject()
+  private preferences: WorkspacePreferences = {
+    defaultSessionStrategy: 'sandbox-copy'
+  }
   private workspaceSummary: WorkspaceSummary = {
     activeSessions: 0,
     totalCpuPercent: 0,
     totalMemoryMb: 0,
     totalProcesses: 0,
-    lastUpdated: Date.now()
+    lastUpdated: Date.now(),
+    defaultSessionStrategy: 'sandbox-copy'
   }
 
   constructor() {
@@ -94,8 +124,17 @@ export class SessionManager extends EventEmitter {
       activityLog: structuredClone(this.activityLog),
       metrics: this.listSessionMetrics(),
       histories: this.listSessionHistories(),
-      diffs: this.listSessionDiffs()
+      diffs: this.listSessionDiffs(),
+      preferences: structuredClone(this.preferences)
     }
+  }
+
+  async setDefaultSessionStrategy(strategy: SessionWorkspaceStrategy): Promise<WorkspacePreferences> {
+    this.preferences = {
+      defaultSessionStrategy: strategy
+    }
+    this.emitWorkspaceState()
+    return structuredClone(this.preferences)
   }
 
   async selectProject(): Promise<ProjectState> {
@@ -148,13 +187,19 @@ export class SessionManager extends EventEmitter {
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<SessionSummary> {
-    if (!this.projectState.path || !this.projectState.isGitRepo) {
-      throw new Error('Open a Git repository before starting an agent session.')
+    const projectPath = this.projectState.path
+    if (!projectPath) {
+      throw new Error('Open a project folder before starting an agent session.')
+    }
+
+    const workspaceStrategy = input.workspaceStrategy ?? this.preferences.defaultSessionStrategy
+    if (workspaceStrategy === 'git-worktree' && !this.projectState.isGitRepo) {
+      throw new Error('Git Worktree mode requires a Git repository. Use Sandbox Copy mode for plain folders.')
     }
 
     const label = input.label?.trim() || `Agent ${String(this.sessionRecords.size + 1).padStart(2, '0')}`
-    const { branchName, worktreePath } = await this.createWorktree(label)
     const sessionId = `${createTimestamp()}-${createToken()}`
+    const workspace = await this.createSessionWorkspace(label, workspaceStrategy)
 
     let resolveClosed: () => void = () => undefined
     const closePromise = new Promise<void>((resolve) => {
@@ -167,29 +212,31 @@ export class SessionManager extends EventEmitter {
       terminal = nodePty.spawn('powershell.exe', ['-NoLogo'], {
         cols: input.cols ?? 120,
         rows: input.rows ?? 32,
-        cwd: worktreePath,
+        cwd: workspace.workspacePath,
         name: 'xterm-256color',
         useConpty: true,
         env: {
           ...process.env,
           FORCE_COLOR: '1',
           SENTINEL_SESSION_ID: sessionId,
-          SENTINEL_WORKTREE: worktreePath,
-          SENTINEL_BRANCH: branchName
+          SENTINEL_WORKSPACE_PATH: workspace.workspacePath,
+          SENTINEL_WORKSPACE_MODE: workspaceStrategy,
+          SENTINEL_BRANCH: workspace.branchName || ''
         }
       })
     } catch (error) {
-      await this.cleanupDetachedWorktree(this.projectState.path, branchName, worktreePath)
+      await this.cleanupDetachedSessionWorkspace(projectPath, workspace)
       throw error
     }
 
     const summary: SessionSummary = {
       id: sessionId,
       label,
-      projectRoot: this.projectState.path,
-      cwd: worktreePath,
-      worktreePath,
-      branchName,
+      projectRoot: projectPath,
+      cwd: workspace.workspacePath,
+      workspacePath: workspace.workspacePath,
+      workspaceStrategy,
+      branchName: workspace.branchName,
       status: 'starting',
       cleanupState: 'active',
       shell: 'powershell.exe',
@@ -208,7 +255,8 @@ export class SessionManager extends EventEmitter {
       finalized: false,
       commandBuffer: '',
       history: [],
-      modifiedPaths: []
+      modifiedPaths: [],
+      sandboxState: workspace.sandboxState
     }
 
     this.sessionRecords.set(sessionId, record)
@@ -264,46 +312,169 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  async writeSessionFile(sessionId: string, relativePath: string, content: string): Promise<void> {
+    const record = this.sessionRecords.get(sessionId)
+    if (!record) {
+      throw new Error('Session not found.')
+    }
+
+    if (record.summary.workspaceStrategy === 'sandbox-copy') {
+      await writeSandboxFile(record.summary.workspacePath, relativePath, content)
+    } else {
+      const filePath = resolveWorkspaceFilePath(record.summary.workspacePath, relativePath)
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      await fs.writeFile(filePath, content, 'utf-8')
+    }
+
+    this.scheduleRuntimeRefresh()
+  }
+
   async readFileDiff(sessionId: string, filePath: string): Promise<string> {
     const record = this.sessionRecords.get(sessionId)
-    if (!record) return ''
+    if (!record) {
+      return ''
+    }
+
+    if (record.summary.workspaceStrategy !== 'git-worktree') {
+      return ''
+    }
+
     try {
-      return await this.runGitCommand(record.summary.worktreePath, ['diff', 'HEAD', '--', filePath])
+      return await this.runGitCommand(record.summary.workspacePath, ['diff', 'HEAD', '--', filePath])
     } catch {
       return ''
     }
   }
 
-  async mergeWorktree(sessionId: string): Promise<void> {
+  async applySession(sessionId: string): Promise<SessionApplyResult> {
     const record = this.sessionRecords.get(sessionId)
     if (!record || !this.projectState.path) {
       throw new Error('Session or project not found.')
     }
 
-    // Merge the worktree's branch into the root project
-    await this.runGitCommand(this.projectState.path, ['merge', record.summary.branchName])
+    if (record.summary.workspaceStrategy === 'git-worktree') {
+      await this.runGitCommand(this.projectState.path, ['merge', record.summary.branchName || ''])
+      await this.refreshProject()
+      this.scheduleRuntimeRefresh()
+
+      return {
+        sessionId,
+        workspaceStrategy: 'git-worktree',
+        appliedPaths: [...record.modifiedPaths],
+        conflicts: []
+      }
+    }
+
+    if (!record.sandboxState) {
+      throw new Error('Sandbox session state is unavailable.')
+    }
+
+    this.pushActivityLog({
+      scope: 'workspace',
+      status: 'started',
+      command: 'Apply sandbox changes to project',
+      cwd: record.summary.workspacePath
+    })
+
+    try {
+      const applied = await applySandboxWorkspace(
+        sessionId,
+        record.summary.projectRoot,
+        record.summary.workspacePath,
+        record.sandboxState
+      )
+      record.sandboxState.baselineHashes = applied.nextBaselineHashes
+      record.sandboxState.scanCache = applied.nextCache
+
+      const refreshedDiffs = await refreshSandboxWorkspaceDiffs(
+        record.summary.workspacePath,
+        record.sandboxState
+      )
+      record.sandboxState.scanCache = refreshedDiffs.nextCache
+      record.modifiedPaths = refreshedDiffs.modifiedPaths
+      this.emitSessionDiff(record)
+
+      await this.refreshProject()
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: applied.result.conflicts.length > 0 ? 'failed' : 'completed',
+        command: 'Apply sandbox changes to project',
+        cwd: record.summary.workspacePath,
+        detail:
+          applied.result.conflicts.length > 0
+            ? `${applied.result.appliedPaths.length} applied, ${applied.result.conflicts.length} conflicts`
+            : `${applied.result.appliedPaths.length} file(s) applied`
+      })
+
+      return applied.result
+    } catch (error) {
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'failed',
+        command: 'Apply sandbox changes to project',
+        cwd: record.summary.workspacePath,
+        detail: error instanceof Error ? error.message : 'Sandbox apply failed.'
+      })
+      throw error
+    }
   }
 
-  async commitWorktree(sessionId: string, message: string): Promise<void> {
+  async commitSession(sessionId: string, message: string): Promise<void> {
     const record = this.sessionRecords.get(sessionId)
     if (!record || !this.projectState.path) {
       throw new Error('Session or project not found.')
     }
-    
-    await this.runGitCommand(record.summary.worktreePath, ['add', '.'])
-    await this.runGitCommand(record.summary.worktreePath, ['commit', '-m', message])
+
+    if (record.summary.workspaceStrategy !== 'git-worktree') {
+      throw new Error('Commit is only available for Git Worktree sessions.')
+    }
+
+    await this.runGitCommand(record.summary.workspacePath, ['add', '.'])
+    await this.runGitCommand(record.summary.workspacePath, ['commit', '-m', message])
     this.scheduleRuntimeRefresh()
   }
 
-  async discardWorktree(sessionId: string): Promise<void> {
+  async discardSessionChanges(sessionId: string): Promise<void> {
     const record = this.sessionRecords.get(sessionId)
     if (!record || !this.projectState.path) {
       throw new Error('Session or project not found.')
     }
 
-    await this.runGitCommand(record.summary.worktreePath, ['reset', '--hard'])
-    await this.runGitCommand(record.summary.worktreePath, ['clean', '-fd'])
-    this.scheduleRuntimeRefresh()
+    if (record.summary.workspaceStrategy === 'git-worktree') {
+      await this.runGitCommand(record.summary.workspacePath, ['reset', '--hard'])
+      await this.runGitCommand(record.summary.workspacePath, ['clean', '-fd'])
+      this.scheduleRuntimeRefresh()
+      return
+    }
+
+    this.pushActivityLog({
+      scope: 'workspace',
+      status: 'started',
+      command: 'Discard sandbox changes',
+      cwd: record.summary.workspacePath
+    })
+
+    try {
+      record.sandboxState = await discardSandboxWorkspace(record.summary.projectRoot, record.summary.workspacePath)
+      record.modifiedPaths = []
+      this.emitSessionDiff(record)
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'completed',
+        command: 'Discard sandbox changes',
+        cwd: record.summary.workspacePath
+      })
+      this.scheduleRuntimeRefresh()
+    } catch (error) {
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'failed',
+        command: 'Discard sandbox changes',
+        cwd: record.summary.workspacePath,
+        detail: error instanceof Error ? error.message : 'Sandbox discard failed.'
+      })
+      throw error
+    }
   }
 
   async resizeSession(sessionId: string, cols: number, rows: number): Promise<void> {
@@ -527,7 +698,65 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  private async createWorktree(label: string): Promise<{ branchName: string; worktreePath: string }> {
+  private async createSessionWorkspace(
+    label: string,
+    workspaceStrategy: SessionWorkspaceStrategy
+  ): Promise<{ workspacePath: string; branchName?: string; sandboxState?: SessionRecord['sandboxState'] }> {
+    if (workspaceStrategy === 'git-worktree') {
+      const worktree = await this.createWorktree(label)
+      return {
+        workspacePath: worktree.workspacePath,
+        branchName: worktree.branchName
+      }
+    }
+
+    const projectPath = this.projectState.path
+    if (!projectPath) {
+      throw new Error('Project root is unavailable.')
+    }
+
+    const projectName = sanitizeSegment(this.projectState.name || 'project')
+    const sessionStamp = createTimestamp()
+    const token = createToken()
+    const tempRoot = path.join(os.tmpdir(), 'sentinel-sandboxes', projectName)
+    const workspacePath = path.join(tempRoot, `${sanitizeSegment(label)}-${sessionStamp}-${token}`)
+
+    await fs.mkdir(tempRoot, { recursive: true })
+    this.pushActivityLog({
+      scope: 'workspace',
+      status: 'started',
+      command: 'Create sandbox workspace',
+      cwd: workspacePath
+    })
+
+    try {
+      const sandboxState = await createSandboxWorkspace(projectPath, workspacePath)
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'completed',
+        command: 'Create sandbox workspace',
+        cwd: workspacePath
+      })
+
+      return {
+        workspacePath,
+        sandboxState
+      }
+    } catch (error) {
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'failed',
+        command: 'Create sandbox workspace',
+        cwd: workspacePath,
+        detail: error instanceof Error ? error.message : 'Sandbox creation failed.'
+      })
+      throw error
+    }
+  }
+
+  private async createWorktree(
+    label: string
+  ): Promise<{ branchName: string; workspacePath: string }> {
     const projectPath = this.projectState.path
 
     if (!projectPath) {
@@ -539,14 +768,14 @@ export class SessionManager extends EventEmitter {
     const token = createToken()
     const branchName = `sentinel/${projectName}-${sanitizeSegment(label)}-${sessionStamp}-${token}`
     const tempRoot = path.join(os.tmpdir(), 'sentinel-worktrees', projectName)
-    const worktreePath = path.join(tempRoot, `${sanitizeSegment(label)}-${sessionStamp}-${token}`)
+    const workspacePath = path.join(tempRoot, `${sanitizeSegment(label)}-${sessionStamp}-${token}`)
 
     await fs.mkdir(tempRoot, { recursive: true })
-    await this.runGitCommand(projectPath, ['worktree', 'add', '-b', branchName, worktreePath, 'HEAD'])
+    await this.runGitCommand(projectPath, ['worktree', 'add', '-b', branchName, workspacePath, 'HEAD'])
 
     return {
       branchName,
-      worktreePath
+      workspacePath
     }
   }
 
@@ -581,7 +810,7 @@ export class SessionManager extends EventEmitter {
       record.modifiedPaths = []
       this.emitSessionMetrics(record, [], Date.now())
       this.emitSessionDiff(record)
-      await this.cleanupWorktree(record.summary)
+      await this.cleanupSessionWorkspace(record.summary)
       record.finalized = true
       this.emit('session-state', structuredClone(record.summary))
       this.emitWorkspaceState()
@@ -591,9 +820,29 @@ export class SessionManager extends EventEmitter {
     await record.finalizePromise
   }
 
+  private async cleanupSessionWorkspace(summary: SessionSummary): Promise<void> {
+    if (summary.workspaceStrategy === 'git-worktree') {
+      await this.cleanupWorktree(summary)
+      return
+    }
+
+    if (!(await pathExists(summary.workspacePath))) {
+      summary.cleanupState = 'removed'
+      return
+    }
+
+    try {
+      await fs.rm(summary.workspacePath, { recursive: true, force: true })
+      summary.cleanupState = 'removed'
+    } catch (error) {
+      summary.cleanupState = 'failed'
+      summary.error = error instanceof Error ? error.message : 'Sandbox cleanup failed.'
+    }
+  }
+
   private async cleanupWorktree(summary: SessionSummary): Promise<void> {
     const projectPath = summary.projectRoot
-    if (!projectPath || !(await pathExists(summary.worktreePath))) {
+    if (!projectPath || !(await pathExists(summary.workspacePath))) {
       summary.cleanupState = 'removed'
       return
     }
@@ -601,24 +850,26 @@ export class SessionManager extends EventEmitter {
     const cleanupErrors: string[] = []
 
     try {
-      await this.runGitCommand(projectPath, ['worktree', 'remove', '--force', summary.worktreePath])
+      await this.runGitCommand(projectPath, ['worktree', 'remove', '--force', summary.workspacePath])
     } catch (error) {
       cleanupErrors.push(error instanceof Error ? error.message : 'Worktree remove failed.')
     }
 
-    try {
-      await this.runGitCommand(projectPath, ['branch', '-D', summary.branchName])
-    } catch (error) {
-      cleanupErrors.push(error instanceof Error ? error.message : 'Branch cleanup failed.')
+    if (summary.branchName) {
+      try {
+        await this.runGitCommand(projectPath, ['branch', '-D', summary.branchName])
+      } catch (error) {
+        cleanupErrors.push(error instanceof Error ? error.message : 'Branch cleanup failed.')
+      }
     }
 
     try {
-      await fs.rm(summary.worktreePath, { recursive: true, force: true })
+      await fs.rm(summary.workspacePath, { recursive: true, force: true })
     } catch (error) {
       cleanupErrors.push(error instanceof Error ? error.message : 'Filesystem cleanup failed.')
     }
 
-    if (cleanupErrors.length > 0 && (await pathExists(summary.worktreePath))) {
+    if (cleanupErrors.length > 0 && (await pathExists(summary.workspacePath))) {
       summary.cleanupState = 'failed'
       summary.error = cleanupErrors.join(' ')
       return
@@ -627,17 +878,33 @@ export class SessionManager extends EventEmitter {
     summary.cleanupState = 'removed'
   }
 
+  private async cleanupDetachedSessionWorkspace(
+    projectPath: string,
+    workspace: { workspacePath: string; branchName?: string }
+  ): Promise<void> {
+    if (workspace.branchName) {
+      await this.cleanupDetachedWorktree(projectPath, workspace.branchName, workspace.workspacePath)
+      return
+    }
+
+    try {
+      await fs.rm(workspace.workspacePath, { recursive: true, force: true })
+    } catch {
+      // Ignore best-effort cleanup failures while unwinding a failed session create.
+    }
+  }
+
   private async cleanupDetachedWorktree(
     projectPath: string | undefined,
     branchName: string,
-    worktreePath: string
+    workspacePath: string
   ): Promise<void> {
     if (!projectPath) {
       return
     }
 
     try {
-      await this.runGitCommand(projectPath, ['worktree', 'remove', '--force', worktreePath])
+      await this.runGitCommand(projectPath, ['worktree', 'remove', '--force', workspacePath])
     } catch {
       // The worktree may not have been registered yet.
     }
@@ -649,7 +916,7 @@ export class SessionManager extends EventEmitter {
     }
 
     try {
-      await fs.rm(worktreePath, { recursive: true, force: true })
+      await fs.rm(workspacePath, { recursive: true, force: true })
     } catch {
       // Ignore best-effort filesystem cleanup failures.
     }
@@ -736,7 +1003,7 @@ export class SessionManager extends EventEmitter {
       rootIds.length > 0
         ? collectProcessTreeSnapshots(rootIds)
         : Promise.resolve(new Map<number, ProcessTreeSnapshot>()),
-      collectWorktreeDiffs(
+      collectWorkspaceDiffs(
         activeRecords.filter(
           (record) => record.summary.status === 'starting' || record.summary.status === 'ready'
         )
@@ -816,6 +1083,7 @@ export class SessionManager extends EventEmitter {
         0
       ),
       lastUpdated: Date.now(),
+      defaultSessionStrategy: this.preferences.defaultSessionStrategy,
       projectPath: this.projectState.path,
       projectName: this.projectState.name,
       branch: this.projectState.branch

@@ -57,15 +57,16 @@ export function delay(ms: number): Promise<void> {
   })
 }
 
-export function normalizeSessionPaths(projectRoot: string, relativePaths: string[]): string[] {
-  return [
-    ...new Set(
-      relativePaths
-        .map((relativePath) => relativePath.trim())
-        .filter(Boolean)
-        .map((relativePath) => path.normalize(path.resolve(projectRoot, relativePath)))
-    )
-  ].sort((left, right) => left.localeCompare(right))
+export function normalizeRelativePath(relativePath: string): string {
+  return path
+    .normalize(relativePath.trim().replace(/\//g, path.sep))
+    .replace(/^[\\/]+/, '')
+}
+
+export function normalizeSessionPaths(_projectRoot: string, relativePaths: string[]): string[] {
+  return [...new Set(relativePaths.map(normalizeRelativePath).filter(Boolean))].sort((left, right) =>
+    left.localeCompare(right)
+  )
 }
 
 export function arrayEquals(left: string[], right: string[]): boolean {

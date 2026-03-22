@@ -2,7 +2,7 @@ import path from 'node:path'
 
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
 
-import type { CreateSessionInput } from '@shared/types'
+import type { CreateSessionInput, SessionWorkspaceStrategy } from '@shared/types'
 
 import { SessionManager } from './session-manager'
 
@@ -59,6 +59,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle('sentinel:bootstrap', () => sessionManager.bootstrap())
   ipcMain.handle('sentinel:select-project', () => sessionManager.selectProject())
   ipcMain.handle('sentinel:refresh-project', () => sessionManager.refreshProject())
+  ipcMain.handle('sentinel:set-default-session-strategy', (_event, strategy: SessionWorkspaceStrategy) =>
+    sessionManager.setDefaultSessionStrategy(strategy)
+  )
   ipcMain.handle('sentinel:create-session', (_event, input: CreateSessionInput | undefined) =>
     sessionManager.createSession(input)
   )
@@ -75,12 +78,15 @@ function registerIpcHandlers(): void {
   ipcMain.handle('sentinel:read-file-diff', (_event, payload: { sessionId: string; filePath: string }) =>
     sessionManager.readFileDiff(payload.sessionId, payload.filePath)
   )
-  ipcMain.handle('sentinel:merge-worktree', (_event, sessionId: string) => sessionManager.mergeWorktree(sessionId))
-  ipcMain.handle('sentinel:commit-worktree', (_event, payload: { sessionId: string; message: string }) => 
-    sessionManager.commitWorktree(payload.sessionId, payload.message)
+  ipcMain.handle('sentinel:write-session-file', (_event, payload: { sessionId: string; relativePath: string; content: string }) =>
+    sessionManager.writeSessionFile(payload.sessionId, payload.relativePath, payload.content)
   )
-  ipcMain.handle('sentinel:discard-worktree', (_event, sessionId: string) => 
-    sessionManager.discardWorktree(sessionId)
+  ipcMain.handle('sentinel:apply-session', (_event, sessionId: string) => sessionManager.applySession(sessionId))
+  ipcMain.handle('sentinel:commit-session', (_event, payload: { sessionId: string; message: string }) => 
+    sessionManager.commitSession(payload.sessionId, payload.message)
+  )
+  ipcMain.handle('sentinel:discard-session-changes', (_event, sessionId: string) => 
+    sessionManager.discardSessionChanges(sessionId)
   )
   ipcMain.handle('sentinel:reveal-in-file-explorer', (_event, filePath: string) => {
     shell.showItemInFolder(filePath)

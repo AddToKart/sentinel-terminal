@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import { DiffEditor } from '@monaco-editor/react'
 import {
+  CopyCheck,
   Code2,
   Cpu,
   GitCommit,
@@ -19,7 +20,7 @@ import {
   X
 } from 'lucide-react'
 
-import type { SessionCommandEntry, SessionSummary } from '@shared/types'
+import type { SessionApplyResult, SessionCommandEntry, SessionSummary } from '@shared/types'
 
 interface SessionTileProps {
   session: SessionSummary
@@ -27,9 +28,9 @@ interface SessionTileProps {
   modifiedPaths: string[]
   onClose: (sessionId: string) => Promise<void>
   onToggleMaximize: (sessionId: string) => void
-  mergeWorktree: () => Promise<void>
-  commitWorktree: (message: string) => Promise<void>
-  discardWorktree: () => Promise<void>
+  applySession: () => Promise<SessionApplyResult>
+  commitSession: (message: string) => Promise<void>
+  discardSessionChanges: () => Promise<void>
   isMaximized: boolean
   fitNonce: number
 }
@@ -60,9 +61,9 @@ export function SessionTile({
   modifiedPaths,
   onClose,
   onToggleMaximize,
-  mergeWorktree,
-  commitWorktree,
-  discardWorktree,
+  applySession,
+  commitSession,
+  discardSessionChanges,
   isMaximized,
   fitNonce
 }: SessionTileProps): JSX.Element {
@@ -97,7 +98,10 @@ export function SessionTile({
     terminal.loadAddon(fitAddon)
     terminal.open(terminalHostRef.current)
     terminal.writeln(`\x1b[38;2;140;245;221m${session.label.toUpperCase()}\x1b[0m`)
-    terminal.writeln(`\x1b[38;2;143;165;184mBranch:\x1b[0m ${session.branchName}`)
+    terminal.writeln(`\x1b[38;2;143;165;184mWorkspace:\x1b[0m ${session.workspaceStrategy}`)
+    if (session.branchName) {
+      terminal.writeln(`\x1b[38;2;143;165;184mBranch:\x1b[0m ${session.branchName}`)
+    }
     terminal.writeln(`\x1b[38;2;143;165;184mPID:\x1b[0m ${session.pid ?? '--'}`)
     terminal.writeln('')
 
@@ -133,7 +137,7 @@ export function SessionTile({
       terminalRef.current = null
       fitAddonRef.current = null
     }
-  }, [session.id, session.branchName, session.label, session.pid])
+  }, [session.id, session.branchName, session.label, session.pid, session.workspaceStrategy])
 
   // Re-fit on nonce/mode change
   useEffect(() => {
@@ -162,7 +166,7 @@ export function SessionTile({
       try {
         const sep = session.projectRoot.includes('/') ? '/' : '\\'
         const root = await window.sentinel.readFile(`${session.projectRoot}${sep}${reviewFile}`)
-        const wt = await window.sentinel.readFile(`${session.worktreePath}${sep}${reviewFile}`)
+        const wt = await window.sentinel.readFile(`${session.workspacePath}${sep}${reviewFile}`)
         if (!active) return
         setOriginalContent(root)
         setModifiedContent(wt)
@@ -174,7 +178,7 @@ export function SessionTile({
     }
     load()
     return () => { active = false }
-  }, [viewMode, reviewFile, session.projectRoot, session.worktreePath])
+  }, [viewMode, reviewFile, session.projectRoot, session.workspacePath])
 
   useEffect(() => {
     if (modifiedPaths.length > 0 && !modifiedPaths.includes(reviewFile)) {
@@ -182,17 +186,35 @@ export function SessionTile({
     }
   }, [modifiedPaths])
 
-  async function handleOp(op: 'merge' | 'commit' | 'discard') {
+  async function handleOp(op: 'apply' | 'commit' | 'discard') {
     if (opLoading) return
     setOpLoading(op)
     try {
-      if (op === 'merge') await mergeWorktree()
+      if (op === 'apply') {
+        const result = await applySession()
+        if (result.conflicts.length > 0) {
+          terminalRef.current?.writeln(`\n\x1b[38;2;255;170;170mApply completed with ${result.conflicts.length} conflict(s).\x1b[0m`)
+          for (const conflict of result.conflicts.slice(0, 8)) {
+            terminalRef.current?.writeln(`\x1b[38;2;143;165;184mconflict:\x1b[0m ${conflict.path}`)
+          }
+          if (result.conflicts.length > 8) {
+            terminalRef.current?.writeln(`\x1b[38;2;143;165;184m...and ${result.conflicts.length - 8} more\x1b[0m`)
+          }
+        } else {
+          terminalRef.current?.writeln(`\n\x1b[38;2;140;245;221mApplied ${result.appliedPaths.length} file(s) back to the main project.\x1b[0m`)
+        }
+      }
       if (op === 'commit') {
         const msg = prompt('Commit message:', 'Agent update') || 'Update'
-        await commitWorktree(msg)
+        await commitSession(msg)
       }
       if (op === 'discard') {
-        if (confirm('Discard all uncommitted changes in this worktree?')) await discardWorktree()
+        const confirmed = confirm(
+          session.workspaceStrategy === 'sandbox-copy'
+            ? 'Discard all changes in this sandbox workspace and resync it with the main project?'
+            : 'Discard all uncommitted changes in this worktree?'
+        )
+        if (confirmed) await discardSessionChanges()
       }
     } catch (e: any) {
       terminalRef.current?.writeln(`\n\x1b[38;2;255;170;170mOp failed: ${e.message}\x1b[0m\n`)
@@ -216,6 +238,9 @@ export function SessionTile({
         <div className="flex items-center gap-2">
           <span className={`h-1.5 w-1.5 rounded-full ${statusColor(session.status)}`} />
           <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/80">{session.label}</span>
+          <span className="text-[9px] uppercase tracking-[0.2em] text-sentinel-mist/70">
+            {session.workspaceStrategy === 'sandbox-copy' ? 'sandbox' : 'worktree'}
+          </span>
           {modifiedPaths.length > 0 && (
             <span className="text-[9px] text-amber-400/80 tracking-widest">{modifiedPaths.length} changes</span>
           )}
@@ -226,10 +251,11 @@ export function SessionTile({
           <button className={`px-1.5 py-0.5 text-[9px] uppercase tracking-widest transition ${viewMode === 'review' ? 'text-emerald-400' : 'text-white/30 hover:text-white/70'}`} onClick={() => setViewMode('review')} title="Diff"><Code2 className="h-2.5 w-2.5" /></button>
           <button className={`px-1.5 py-0.5 text-[9px] uppercase tracking-widest transition ${viewMode === 'history' ? 'text-sentinel-accent' : 'text-white/30 hover:text-white/70'}`} onClick={() => setViewMode('history')} title="History"><History className="h-2.5 w-2.5" /></button>
           <div className="mx-1 h-3 w-px bg-white/10" />
-          {/* Git ops */}
-          <button className="px-1 text-white/30 hover:text-emerald-300 transition disabled:opacity-20" disabled={isClosing || opLoading !== null || modifiedPaths.length === 0} onClick={() => handleOp('commit')} title="Commit"><GitCommit className="h-2.5 w-2.5" /></button>
+          {session.workspaceStrategy === 'git-worktree' && (
+            <button className="px-1 text-white/30 hover:text-emerald-300 transition disabled:opacity-20" disabled={isClosing || opLoading !== null || modifiedPaths.length === 0} onClick={() => handleOp('commit')} title="Commit"><GitCommit className="h-2.5 w-2.5" /></button>
+          )}
           <button className="px-1 text-white/30 hover:text-rose-300 transition disabled:opacity-20" disabled={isClosing || opLoading !== null || modifiedPaths.length === 0} onClick={() => handleOp('discard')} title="Discard"><Trash2 className="h-2.5 w-2.5" /></button>
-          <button className="px-1 text-white/30 hover:text-sentinel-glow transition disabled:opacity-20" disabled={isClosing || opLoading !== null} onClick={() => handleOp('merge')} title="Merge to Main"><GitMerge className="h-2.5 w-2.5" /></button>
+          <button className="px-1 text-white/30 hover:text-sentinel-glow transition disabled:opacity-20" disabled={isClosing || opLoading !== null || modifiedPaths.length === 0} onClick={() => handleOp('apply')} title={session.workspaceStrategy === 'sandbox-copy' ? 'Apply to Main Project' : 'Merge to Main'}>{session.workspaceStrategy === 'sandbox-copy' ? <CopyCheck className="h-2.5 w-2.5" /> : <GitMerge className="h-2.5 w-2.5" />}</button>
           <div className="mx-1 h-3 w-px bg-white/10" />
           <button className="px-1 text-white/30 hover:text-white transition" onClick={() => onToggleMaximize(session.id)} title={isMaximized ? 'Restore' : 'Maximize'}>
             {isMaximized ? <Minimize2 className="h-2.5 w-2.5" /> : <Maximize2 className="h-2.5 w-2.5" />}

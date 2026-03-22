@@ -40,7 +40,19 @@ export interface SessionRecord {
   commandBuffer: string
   history: SessionCommandEntry[]
   modifiedPaths: string[]
+  sandboxState?: SandboxWorkspaceState
   finalizePromise?: Promise<void>
+}
+
+export interface FileFingerprint {
+  signature: string
+  hash: string
+}
+
+export interface SandboxWorkspaceState {
+  baselineHashes: Map<string, string>
+  scanCache: Map<string, FileFingerprint>
+  sharedDirectories: string[]
 }
 
 export type ManagerEvents = {

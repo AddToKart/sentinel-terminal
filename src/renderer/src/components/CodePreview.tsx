@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
-import { Code2, Diff, FileCode2, X } from 'lucide-react'
+import { Code2, Diff, FileCode2, Save, X } from 'lucide-react'
 import type { SessionSummary } from '@shared/types'
 
 interface CodePreviewProps {
@@ -32,6 +32,14 @@ function joinPath(base: string, relative: string): string {
   return `${base.replace(/[\/\\]$/, '')}\\${normalized}`
 }
 
+function relativeProjectPath(filePath: string, projectPath: string): string {
+  const normalizedFile = filePath.replace(/\//g, '\\')
+  const normalizedProject = projectPath.replace(/[\/\\]$/, '').replace(/\//g, '\\')
+  return normalizedFile.startsWith(normalizedProject)
+    ? normalizedFile.slice(normalizedProject.length + 1)
+    : normalizedFile.split('\\').pop() ?? ''
+}
+
 export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePreviewProps): JSX.Element {
   const [activeTab, setActiveTab] = useState<ViewTab>('edit')
   const [editContent, setEditContent] = useState('')
@@ -43,17 +51,19 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
   const [saveError, setSaveError] = useState<string | null>(null)
 
   const activeSession = sessions.find(s => s.id === activeSessionId) ?? sessions[0]
+  const relativePath = filePath && projectPath ? relativeProjectPath(filePath, projectPath) : null
 
-  // Determine which worktree path to read from for the active session
-  const worktreeFilePath = useCallback((): string | null => {
+  // Determine which workspace path to read from for the active session
+  const workspaceFilePath = useCallback((): string | null => {
     if (!filePath || !projectPath || !activeSession) return null
-    const normalizedFile = filePath.replace(/\//g, '\\')
-    const normalizedProject = projectPath.replace(/[\/\\]$/, '').replace(/\//g, '\\')
-    const relative = normalizedFile.startsWith(normalizedProject)
-      ? normalizedFile.slice(normalizedProject.length + 1)
-      : normalizedFile.split('\\').pop() ?? ''
-    return joinPath(activeSession.worktreePath, relative)
-  }, [filePath, projectPath, activeSession])
+    return joinPath(activeSession.workspacePath, relativePath ?? '')
+  }, [activeSession, filePath, projectPath, relativePath])
+
+  useEffect(() => {
+    if (!activeSessionId && sessions[0]?.id) {
+      setActiveSessionId(sessions[0].id)
+    }
+  }, [activeSessionId, sessions])
 
   useEffect(() => {
     if (!filePath) return
@@ -63,9 +73,9 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
     
     async function fetchContents() {
       try {
-        // Always load the file from the active session's worktree for editing
-        const worktree = worktreeFilePath()
-        const content = await window.sentinel.readFile(worktree ?? filePath!)
+        // Always load the file from the active session's workspace for editing
+        const workspace = workspaceFilePath()
+        const content = await window.sentinel.readFile(workspace ?? filePath!)
         if (cancelled) return
         setEditContent(content)
 
@@ -87,7 +97,33 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
 
     fetchContents()
     return () => { cancelled = true }
-  }, [filePath, activeSessionId, worktreeFilePath])
+  }, [filePath, activeSessionId, workspaceFilePath])
+
+  async function handleSave() {
+    if (!activeSession || !relativePath) return
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await window.sentinel.writeSessionFile(activeSession.id, relativePath, editContent)
+      setModifiedContent(editContent)
+    } catch (error: any) {
+      setSaveError(error.message || 'Save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!event.ctrlKey || event.altKey || event.shiftKey || event.code !== 'KeyS') return
+      if (!filePath || !activeSession || !relativePath) return
+      event.preventDefault()
+      void handleSave()
+    }
+
+    window.addEventListener('keydown', onKeyDown, { capture: true })
+    return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
+  }, [activeSession, editContent, filePath, relativePath])
 
   if (!filePath) {
     return (
@@ -154,7 +190,21 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
 
         {/* Right: actions */}
         <div className="flex items-center gap-2 shrink-0">
+          {activeSession && (
+            <div className="text-[10px] uppercase tracking-[0.2em] text-sentinel-mist">
+              {activeSession.workspaceStrategy === 'sandbox-copy' ? 'sandbox' : 'worktree'}
+            </div>
+          )}
           {saveError && <span className="text-[10px] text-rose-300">{saveError}</span>}
+          <button
+            onClick={() => { void handleSave() }}
+            className="inline-flex items-center gap-1.5 border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-sentinel-mist transition hover:border-sentinel-accent/40 hover:text-white disabled:opacity-40"
+            disabled={!activeSession || !relativePath || saving}
+            title="Save to session workspace"
+          >
+            <Save className="h-3 w-3" />
+            {saving ? 'Saving' : 'Save'}
+          </button>
           <button
             onClick={onClose}
             className="text-sentinel-mist/60 hover:text-white transition-colors"
@@ -180,7 +230,11 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
             language={language}
             theme="vs-dark"
             value={editContent}
-            onChange={(val) => setEditContent(val ?? '')}
+            onChange={(val) => {
+              const nextValue = val ?? ''
+              setEditContent(nextValue)
+              setModifiedContent(nextValue)
+            }}
             options={{
               fontFamily: 'JetBrains Mono, Cascadia Code, Consolas, monospace',
               fontSize: 13,

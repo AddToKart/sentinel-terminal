@@ -16,3 +16,12 @@ export const IGNORED_DIRECTORIES = new Set([
   'coverage',
   '__pycache__'
 ])
+
+export const SANDBOX_LINK_DIRECTORIES = new Set([
+  'node_modules',
+  '.venv',
+  'venv',
+  '.tox',
+  '.yarn',
+  '.pnpm-store'
+])

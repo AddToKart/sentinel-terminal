@@ -98,9 +98,9 @@ export function AgentDashboard({
             onClose={onClose}
             onToggleMaximize={onToggleMaximize}
             session={session}
-            mergeWorktree={() => window.sentinel.mergeWorktree(session.id)}
-            commitWorktree={(msg) => window.sentinel.commitWorktree(session.id, msg)}
-            discardWorktree={() => window.sentinel.discardWorktree(session.id)}
+            applySession={() => window.sentinel.applySession(session.id)}
+            commitSession={(msg) => window.sentinel.commitSession(session.id, msg)}
+            discardSessionChanges={() => window.sentinel.discardSessionChanges(session.id)}
           />
         </div>
       </div>
@@ -156,9 +156,9 @@ export function AgentDashboard({
                 onClose={onClose}
                 onToggleMaximize={onToggleMaximize}
                 session={masterSession}
-                mergeWorktree={() => window.sentinel.mergeWorktree(masterSession.id)}
-                commitWorktree={(msg) => window.sentinel.commitWorktree(masterSession.id, msg)}
-                discardWorktree={() => window.sentinel.discardWorktree(masterSession.id)}
+                applySession={() => window.sentinel.applySession(masterSession.id)}
+                commitSession={(msg) => window.sentinel.commitSession(masterSession.id, msg)}
+                discardSessionChanges={() => window.sentinel.discardSessionChanges(masterSession.id)}
               />
             </div>
           </Panel>
@@ -182,9 +182,9 @@ export function AgentDashboard({
                         onClose={onClose}
                         onToggleMaximize={onToggleMaximize}
                         session={session}
-                        mergeWorktree={() => window.sentinel.mergeWorktree(session.id)}
-                        commitWorktree={(msg) => window.sentinel.commitWorktree(session.id, msg)}
-                        discardWorktree={() => window.sentinel.discardWorktree(session.id)}
+                        applySession={() => window.sentinel.applySession(session.id)}
+                        commitSession={(msg) => window.sentinel.commitSession(session.id, msg)}
+                        discardSessionChanges={() => window.sentinel.discardSessionChanges(session.id)}
                       />
                     </div>
                   </Panel>
@@ -239,9 +239,9 @@ export function AgentDashboard({
                             onClose={onClose}
                             onToggleMaximize={onToggleMaximize}
                             session={session}
-                            mergeWorktree={() => window.sentinel.mergeWorktree(session.id)}
-                            commitWorktree={(msg) => window.sentinel.commitWorktree(session.id, msg)}
-                            discardWorktree={() => window.sentinel.discardWorktree(session.id)}
+                            applySession={() => window.sentinel.applySession(session.id)}
+                            commitSession={(msg) => window.sentinel.commitSession(session.id, msg)}
+                            discardSessionChanges={() => window.sentinel.discardSessionChanges(session.id)}
                           />
                         </div>
                       </Panel>

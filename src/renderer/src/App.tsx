@@ -10,7 +10,14 @@ import { SessionTile } from './components/SessionTile'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
 
-import type { ActivityLogEntry, ProjectState, SessionCommandEntry, SessionSummary, WorkspaceSummary } from '@shared/types'
+import type {
+  ActivityLogEntry,
+  ProjectState,
+  SessionCommandEntry,
+  SessionSummary,
+  SessionWorkspaceStrategy,
+  WorkspaceSummary
+} from '@shared/types'
 
 const emptyProject = (): ProjectState => ({
   isGitRepo: false,
@@ -25,7 +32,8 @@ const defaultSummary = (): WorkspaceSummary => ({
   totalCpuPercent: 0,
   totalMemoryMb: 0,
   totalProcesses: 0,
-  lastUpdated: Date.now()
+  lastUpdated: Date.now(),
+  defaultSessionStrategy: 'sandbox-copy'
 })
 
 export default function App(): JSX.Element {
@@ -45,19 +53,55 @@ export default function App(): JSX.Element {
   const [globalActionBarOpen, setGlobalActionBarOpen] = useState(false)
   const [globalMode, setGlobalMode] = useState<'multiplex' | 'ide'>('multiplex')
   const [refreshingProject, setRefreshingProject] = useState(false)
+  const [defaultSessionStrategy, setDefaultSessionStrategy] = useState<SessionWorkspaceStrategy>('sandbox-copy')
 
   const sidebarPanelRef = useRef<ImperativePanelHandle | null>(null)
   const shellViewportRef = useRef<HTMLDivElement | null>(null)
 
   // Bootstrap
   useEffect(() => {
+    let disposed = false
+
+    const unsubs = [
+      window.sentinel.onActivityLog((entry) => {
+        setActivityLog((cur) => {
+          const i = cur.findIndex((e) => e.id === entry.id)
+          if (i >= 0) { const n = [...cur]; n[i] = entry; return n }
+          return [entry, ...cur].slice(0, 100)
+        })
+      }),
+      window.sentinel.onWorkspaceState(setWorkspaceSummary),
+      window.sentinel.onSessionState((session) => {
+        setSessions((cur) => {
+          const i = cur.findIndex((s) => s.id === session.id)
+          if (i >= 0) { const n = [...cur]; n[i] = session; return n }
+          return [...cur, session]
+        })
+      }),
+      window.sentinel.onSessionDiff((u) => {
+        setSessionDiffs((cur) => ({ ...cur, [u.sessionId]: u.modifiedPaths }))
+      }),
+      window.sentinel.onSessionHistory((u) => {
+        setSessionHistories((cur) => ({ ...cur, [u.sessionId]: u.entries }))
+      }),
+      window.sentinel.onSessionMetrics((u) => {
+        setSessions((cur) => {
+          const i = cur.findIndex((s) => s.id === u.sessionId)
+          if (i >= 0) { const n = [...cur]; n[i] = { ...n[i], metrics: u.metrics, pid: u.pid ?? n[i].pid }; return n }
+          return cur
+        })
+      })
+    ]
+
     async function init() {
       try {
         const payload = await window.sentinel.bootstrap()
+        if (disposed) return
         setProject(payload.project)
         setSessions(payload.sessions)
         setWorkspaceSummary(payload.summary)
         setActivityLog(payload.activityLog)
+        setDefaultSessionStrategy(payload.preferences.defaultSessionStrategy)
 
         const histories: Record<string, SessionCommandEntry[]> = {}
         for (const u of payload.histories) histories[u.sessionId] = u.entries
@@ -66,43 +110,17 @@ export default function App(): JSX.Element {
         const diffs: Record<string, string[]> = {}
         for (const u of payload.diffs) diffs[u.sessionId] = u.modifiedPaths
         setSessionDiffs(diffs)
-
-        const unsubs = [
-          window.sentinel.onActivityLog((entry) => {
-            setActivityLog((cur) => {
-              const i = cur.findIndex((e) => e.id === entry.id)
-              if (i >= 0) { const n = [...cur]; n[i] = entry; return n }
-              return [entry, ...cur].slice(0, 100)
-            })
-          }),
-          window.sentinel.onWorkspaceState(setWorkspaceSummary),
-          window.sentinel.onSessionState((session) => {
-            setSessions((cur) => {
-              const i = cur.findIndex((s) => s.id === session.id)
-              if (i >= 0) { const n = [...cur]; n[i] = session; return n }
-              return [...cur, session]
-            })
-          }),
-          window.sentinel.onSessionDiff((u) => {
-            setSessionDiffs((cur) => ({ ...cur, [u.sessionId]: u.modifiedPaths }))
-          }),
-          window.sentinel.onSessionHistory((u) => {
-            setSessionHistories((cur) => ({ ...cur, [u.sessionId]: u.entries }))
-          }),
-          window.sentinel.onSessionMetrics((u) => {
-            setSessions((cur) => {
-              const i = cur.findIndex((s) => s.id === u.sessionId)
-              if (i >= 0) { const n = [...cur]; n[i] = { ...n[i], metrics: u.metrics }; return n }
-              return cur
-            })
-          }),
-        ]
-        return () => unsubs.forEach((fn) => fn())
       } catch {
+        if (disposed) return
         setErrorMessage('Failed to initialize Sentinel.')
       }
     }
     void init()
+
+    return () => {
+      disposed = true
+      unsubs.forEach((fn) => fn())
+    }
   }, [])
 
   // Global ResizeObserver to re-fit terminals after any layout change
@@ -157,14 +175,36 @@ export default function App(): JSX.Element {
 
   async function handleCreateSession() {
     if (!project.path) return
-    try { await window.sentinel.createSession() }
+    try { await window.sentinel.createSession({ workspaceStrategy: defaultSessionStrategy }) }
     catch (e: any) { setErrorMessage(`Failed to start session: ${e.message}`) }
   }
 
   async function handleCloseSession(sessionId: string) {
     if (maximizedSessionId === sessionId) setMaximizedSessionId(null)
-    try { await window.sentinel.closeSession(sessionId) }
+    try {
+      await window.sentinel.closeSession(sessionId)
+      setSessions((cur) => cur.filter((session) => session.id !== sessionId))
+      setSessionHistories((cur) => {
+        const next = { ...cur }
+        delete next[sessionId]
+        return next
+      })
+      setSessionDiffs((cur) => {
+        const next = { ...cur }
+        delete next[sessionId]
+        return next
+      })
+    }
     catch (e: any) { setErrorMessage(`Failed to close session: ${e.message}`) }
+  }
+
+  async function handleChangeDefaultSessionStrategy(strategy: SessionWorkspaceStrategy) {
+    try {
+      const nextPreferences = await window.sentinel.setDefaultSessionStrategy(strategy)
+      setDefaultSessionStrategy(nextPreferences.defaultSessionStrategy)
+    } catch (e: any) {
+      setErrorMessage(`Failed to update workspace strategy: ${e.message}`)
+    }
   }
 
   const globalActions = [
@@ -173,13 +213,20 @@ export default function App(): JSX.Element {
     { id: 'refresh-project', label: 'Refresh Tree', icon: <RefreshCw className="h-4 w-4" />, execute: () => void handleRefreshProject() },
     { id: 'toggle-sidebar', label: 'Toggle Sidebar', icon: <PanelLeft className="h-4 w-4" />, execute: toggleSidebar },
     { id: 'toggle-console', label: 'Toggle Console', icon: <TerminalSquare className="h-4 w-4" />, execute: () => setConsoleOpen((v) => !v) },
+    { id: 'sandbox-mode', label: 'Use Sandbox Copy', icon: <TerminalSquare className="h-4 w-4" />, execute: () => void handleChangeDefaultSessionStrategy('sandbox-copy') },
+    { id: 'worktree-mode', label: 'Use Git Worktree', icon: <TerminalSquare className="h-4 w-4" />, execute: () => void handleChangeDefaultSessionStrategy('git-worktree') },
     { id: 'ide-mode', label: 'Switch to IDE Mode', icon: <TerminalSquare className="h-4 w-4" />, execute: () => setGlobalMode('ide') },
     { id: 'multiplex-mode', label: 'Switch to Multiplex Mode', icon: <TerminalSquare className="h-4 w-4" />, execute: () => setGlobalMode('multiplex') },
   ]
 
   const hasProject = Boolean(project.path)
   const diffBadges = Object.fromEntries(
-    Object.values(sessionDiffs).flat().map((p) => [p, ['modified']])
+    Object.values(sessionDiffs)
+      .flat()
+      .map((relativePath) => [
+        project.path ? `${project.path.replace(/[\/\\]$/, '')}\\${relativePath.replace(/\//g, '\\')}` : relativePath,
+        ['modified']
+      ])
   )
 
   // The active IDE session (for the bottom tray)
@@ -197,9 +244,8 @@ export default function App(): JSX.Element {
       {/* ============ TOP HEADER — draggable titlebar ============ */}
       {/*
        * Layout strategy:
-       *  - The entire bar is draggable
+               *  - The entire bar is draggable
        *  - Left cluster: sidebar toggle + project info (no-drag)
-       *  - Center: Multiplex/IDE toggle (absolute center, no-drag)
        *  - Right: padding-only safe zone (≥140px) for Electron controls (never house buttons there)
        */}
       <header
@@ -250,29 +296,6 @@ export default function App(): JSX.Element {
           </div>
         </div>
 
-        {/* CENTER — mode toggle (absolute so it's always precisely centered) */}
-        <div
-          className="absolute left-1/2 -translate-x-1/2 flex items-center rounded border border-white/10 bg-white/[0.04] p-0.5"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        >
-          <button
-            className={`px-3 py-0.5 text-[10px] font-bold uppercase tracking-widest transition rounded-sm ${
-              globalMode === 'multiplex' ? 'bg-sentinel-accent/20 text-white' : 'text-sentinel-mist hover:text-white'
-            }`}
-            onClick={() => setGlobalMode('multiplex')}
-          >
-            Multiplex
-          </button>
-          <button
-            className={`px-3 py-0.5 text-[10px] font-bold uppercase tracking-widest transition rounded-sm ${
-              globalMode === 'ide' ? 'bg-emerald-500/20 text-emerald-300' : 'text-sentinel-mist hover:text-white'
-            }`}
-            onClick={() => setGlobalMode('ide')}
-          >
-            IDE Mode
-          </button>
-        </div>
-
         {/* RIGHT SAFE ZONE — deliberately empty, ≥140px reserved for Electron window controls (min/max/close) */}
         <div className="ml-auto w-[140px] shrink-0" />
       </header>
@@ -296,8 +319,10 @@ export default function App(): JSX.Element {
             <Sidebar
               collapsed={false}
               diffBadges={diffBadges}
+              defaultSessionStrategy={defaultSessionStrategy}
               onOpenProject={handleOpenProject}
               onRefreshProject={handleRefreshProject}
+              onChangeDefaultSessionStrategy={(strategy) => { void handleChangeDefaultSessionStrategy(strategy) }}
               onToggleCollapse={toggleSidebar}
               project={project}
               refreshing={refreshingProject}
@@ -324,7 +349,7 @@ export default function App(): JSX.Element {
                     <div className="max-w-xs text-center p-8 border border-white/10 bg-white/[0.02]">
                       <FolderOpen className="mx-auto mb-4 h-10 w-10 text-sentinel-mist/40" />
                       <h2 className="mb-2 text-base font-bold text-white/90">Open a Repository</h2>
-                      <p className="mb-6 text-sm text-sentinel-mist">Select a Git repo to start agent sessions.</p>
+                      <p className="mb-6 text-sm text-sentinel-mist">Select a project folder to start sandbox-copy or Git worktree agent sessions.</p>
                       <button
                         className="inline-flex h-9 w-full items-center justify-center gap-2 bg-white text-sm font-bold text-sentinel-ink hover:bg-white/90 transition"
                         onClick={() => void handleOpenProject()}
@@ -337,7 +362,7 @@ export default function App(): JSX.Element {
                   <div className="flex h-full items-center justify-center text-center text-sentinel-mist">
                     <div>
                       <TerminalSquare className="mx-auto mb-4 h-10 w-10 opacity-30" />
-                      <p className="text-sm">No active agents — click <strong className="text-white">New Agent</strong> to start</p>
+                      <p className="text-sm">No active agents yet. Start one with <strong className="text-white">New Agent</strong> using the workspace strategy selected in the sidebar.</p>
                     </div>
                   </div>
                 ) : (
@@ -382,9 +407,9 @@ export default function App(): JSX.Element {
                         isMaximized={false}
                         onClose={handleCloseSession}
                         onToggleMaximize={(id) => setMaximizedSessionId((c) => c === id ? null : id)}
-                        mergeWorktree={() => window.sentinel.mergeWorktree(ideSession.id)}
-                        commitWorktree={(msg) => window.sentinel.commitWorktree(ideSession.id, msg)}
-                        discardWorktree={() => window.sentinel.discardWorktree(ideSession.id)}
+                        applySession={() => window.sentinel.applySession(ideSession.id)}
+                        commitSession={(msg) => window.sentinel.commitSession(ideSession.id, msg)}
+                        discardSessionChanges={() => window.sentinel.discardSessionChanges(ideSession.id)}
                         fitNonce={fitNonce}
                       />
                     ) : (
@@ -400,6 +425,7 @@ export default function App(): JSX.Element {
             {/* ---- STATUS BAR ---- */}
             <StatusBar
               consoleOpen={consoleOpen}
+              defaultSessionStrategy={defaultSessionStrategy}
               onToggleConsole={() => setConsoleOpen((v) => !v)}
               summary={workspaceSummary}
             />

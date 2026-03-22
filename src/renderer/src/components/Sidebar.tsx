@@ -4,24 +4,28 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Copy,
   FileCode2,
   FileText,
   Folder,
   FolderOpen,
   FolderRoot,
   GitBranch,
+  GitFork,
   RefreshCw
 } from 'lucide-react'
 
-import type { ProjectNode, ProjectState } from '@shared/types'
+import type { ProjectNode, ProjectState, SessionWorkspaceStrategy } from '@shared/types'
 
 interface SidebarProps {
   project: ProjectState
   refreshing: boolean
   collapsed: boolean
   diffBadges: Record<string, string[]>
+  defaultSessionStrategy: SessionWorkspaceStrategy
   onOpenProject: () => void
   onRefreshProject: () => void
+  onChangeDefaultSessionStrategy: (strategy: SessionWorkspaceStrategy) => void
   onToggleCollapse: () => void
   onFileSelect: (path: string) => void
   globalMode: 'multiplex' | 'ide'
@@ -96,10 +100,10 @@ function TreeNode({
   return (
     <div className="space-y-1">
       <button
-        className={`flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm transition ${
+        className={`group flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm transition-all duration-200 ${
           isModified
             ? 'bg-sentinel-accent/10 text-white'
-            : 'text-sentinel-mist hover:bg-white/[0.05] hover:text-white'
+            : 'text-sentinel-mist hover:bg-white/[0.08] hover:text-white hover:translate-x-1'
         }`}
         onClick={() => {
           if (isDirectory) {
@@ -120,7 +124,7 @@ function TreeNode({
         {isDirectory ? (
           <>
             {hasChildren ? (
-              expanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />
+              <ChevronRight className={`h-4 w-4 shrink-0 transition-transform duration-200 ${expanded ? 'rotate-90' : ''}`} />
             ) : (
               <span className="inline-block h-4 w-4 shrink-0" />
             )}
@@ -141,8 +145,8 @@ function TreeNode({
         {renderDiffBadges(badges)}
       </button>
 
-      {isDirectory && expanded && hasChildren && (
-        <div className="space-y-1">
+      {isDirectory && (
+        <div className={`space-y-1 overflow-hidden transition-all duration-300 ease-in-out ${expanded && hasChildren ? 'max-h-[2000px] opacity-100' : 'max-h-0 opacity-0'}`}>
           {node.children?.map((child) => (
             <TreeNode
               key={child.path}
@@ -166,8 +170,10 @@ export function Sidebar({
   refreshing,
   collapsed,
   diffBadges,
+  defaultSessionStrategy,
   onOpenProject,
   onRefreshProject,
+  onChangeDefaultSessionStrategy,
   onToggleCollapse,
   onFileSelect,
   globalMode,
@@ -237,37 +243,37 @@ export function Sidebar({
 
   if (collapsed) {
     return (
-      <aside className="flex h-full min-h-0 flex-col items-center overflow-hidden border-r border-white/10 bg-sentinel-ink/90 px-3 pb-4 pt-10 backdrop-blur-xl">
+      <aside className="flex h-full min-h-0 w-[64px] flex-col items-center overflow-hidden border-r border-white/10 bg-sentinel-ink/90 px-3 pb-4 pt-10 backdrop-blur-xl animate-in slide-in-from-left-4 duration-300 ease-out">
         <div className="flex flex-col items-center gap-3">
           <button
-            className="inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white/[0.04] text-white transition hover:border-sentinel-accent/40 hover:bg-sentinel-accent/10"
+            className="group inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white/[0.04] text-white transition-all duration-200 hover:border-sentinel-accent/60 hover:bg-sentinel-accent/20 hover:scale-105 hover:shadow-[0_0_15px_rgba(255,255,255,0.1)]"
             onClick={onToggleCollapse}
             title="Expand sidebar"
             type="button"
           >
-            <ChevronRight className="h-4 w-4" />
+            <ChevronRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
           </button>
 
-          <div className="inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white text-sm font-semibold uppercase tracking-[0.28em] text-sentinel-ink">
+          <div className="inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white text-sm font-semibold uppercase tracking-[0.28em] text-sentinel-ink transition-all duration-300 hover:scale-105">
             {project.name?.slice(0, 1) || 'S'}
           </div>
 
           <button
-            className="inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white/[0.04] text-white transition hover:border-sentinel-accent/40 hover:bg-sentinel-accent/10"
+            className="group inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white/[0.04] text-white transition-all duration-200 hover:border-sentinel-accent/60 hover:bg-sentinel-accent/20 hover:scale-105 hover:shadow-[0_0_15px_rgba(255,255,255,0.1)]"
             onClick={onOpenProject}
             title="Open project"
             type="button"
           >
-            <FolderOpen className="h-4 w-4" />
+            <FolderOpen className="h-4 w-4 transition-transform duration-200 group-hover:scale-110" />
           </button>
 
           <button
-            className="inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white/[0.04] text-white transition hover:border-sentinel-accent/40 hover:bg-sentinel-accent/10"
+            className="group inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white/[0.04] text-white transition-all duration-200 hover:border-sentinel-accent/60 hover:bg-sentinel-accent/20 hover:scale-105 hover:shadow-[0_0_15px_rgba(255,255,255,0.1)]"
             onClick={onRefreshProject}
             title="Refresh tree"
             type="button"
           >
-            <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`h-4 w-4 transition-transform duration-200 group-hover:scale-110 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </aside>
@@ -275,25 +281,25 @@ export function Sidebar({
   }
 
   return (
-    <aside className="relative flex h-full min-h-0 flex-col overflow-hidden border-r border-white/10 bg-sentinel-ink/80 px-4 pb-4 pt-10 backdrop-blur-xl transition-[padding] duration-300">
+    <aside className="relative flex h-full min-h-0 flex-col overflow-hidden border-r border-white/10 bg-sentinel-ink/80 px-4 pb-4 pt-10 backdrop-blur-xl animate-in slide-in-from-left-2 duration-300 ease-out">
       <div className="shrink-0 space-y-6">
         <div className="flex items-start justify-between gap-3">
-          <div>
+          <div className="animate-in fade-in slide-in-from-left-3 duration-500 ease-out">
             <div className="text-xs font-medium uppercase tracking-[0.28em] text-sentinel-mist">Workspace</div>
             <div className="mt-2 text-2xl font-semibold tracking-tight text-white">Sentinel</div>
           </div>
 
           <button
-            className="inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white/[0.04] text-white transition hover:border-sentinel-accent/40 hover:bg-sentinel-accent/10"
+            className="group inline-flex h-10 w-10 items-center justify-center border border-white/10 bg-white/[0.04] text-white transition-all duration-200 hover:border-sentinel-accent/60 hover:bg-sentinel-accent/20 hover:scale-105 hover:shadow-[0_0_15px_rgba(255,255,255,0.1)]"
             onClick={onToggleCollapse}
             title="Collapse sidebar"
             type="button"
           >
-            <ChevronLeft className="h-4 w-4" />
+            <ChevronLeft className="h-4 w-4 transition-transform duration-200 group-hover:-translate-x-0.5" />
           </button>
         </div>
 
-        <div className="panel-muted space-y-4 p-4">
+        <div className="panel-muted space-y-4 p-4 animate-in fade-in slide-in-from-left-4 duration-500 ease-out delay-75">
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-2">
               <div className="inline-flex items-center gap-2 border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-sentinel-mist">
@@ -336,9 +342,59 @@ export function Sidebar({
             <FolderOpen className="h-4 w-4" />
             {project.path ? 'Open Another Project' : 'Open Project'}
           </button>
+
+          <div className="space-y-3 border border-white/10 bg-black/20 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-sentinel-mist">
+                Session Workspace
+              </div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-sentinel-mist">
+                default
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <button
+                className={`flex items-start gap-3 border px-3 py-3 text-left transition ${
+                  defaultSessionStrategy === 'sandbox-copy'
+                    ? 'border-sentinel-accent/40 bg-sentinel-accent/12 text-white'
+                    : 'border-white/10 bg-white/[0.03] text-sentinel-mist hover:border-sentinel-accent/25 hover:text-white'
+                }`}
+                onClick={() => onChangeDefaultSessionStrategy('sandbox-copy')}
+                type="button"
+              >
+                <Copy className="mt-0.5 h-4 w-4 shrink-0 text-sentinel-accent" />
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold uppercase tracking-[0.2em]">Sandbox Copy</div>
+                  <div className="text-[11px] leading-5 opacity-80">
+                    Run agents in a temporary copy, then apply reviewed files back into the main project.
+                  </div>
+                </div>
+              </button>
+
+              <button
+                className={`flex items-start gap-3 border px-3 py-3 text-left transition ${
+                  defaultSessionStrategy === 'git-worktree'
+                    ? 'border-sentinel-accent/40 bg-sentinel-accent/12 text-white'
+                    : 'border-white/10 bg-white/[0.03] text-sentinel-mist hover:border-sentinel-accent/25 hover:text-white'
+                } ${project.isGitRepo ? '' : 'cursor-not-allowed opacity-50'}`}
+                disabled={!project.isGitRepo}
+                onClick={() => onChangeDefaultSessionStrategy('git-worktree')}
+                type="button"
+              >
+                <GitFork className="mt-0.5 h-4 w-4 shrink-0 text-sentinel-ice" />
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold uppercase tracking-[0.2em]">Git Worktree</div>
+                  <div className="text-[11px] leading-5 opacity-80">
+                    Advanced branch-based isolation with commit and merge controls.
+                  </div>
+                </div>
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between animate-in fade-in slide-in-from-left-4 duration-500 ease-out delay-100">
           <div className="text-xs font-medium uppercase tracking-[0.24em] text-sentinel-mist">Project Tree</div>
           {project.tree.length > 0 && (
             <div className="border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] uppercase tracking-[0.2em] text-sentinel-mist">
@@ -348,10 +404,10 @@ export function Sidebar({
         </div>
       </div>
 
-      <div className="mt-5 min-h-0 flex-1 overflow-auto pr-1">
+      <div className="mt-5 min-h-0 flex-1 overflow-auto pr-1 animate-in fade-in slide-in-from-left-2 duration-500 ease-out delay-150">
         {project.tree.length === 0 ? (
           <div className="border border-dashed border-white/10 bg-white/[0.03] p-4 text-sm leading-6 text-sentinel-mist">
-            Select a repository to browse files and start worktree-backed agent sessions.
+            Select a project folder to browse files and start sandbox or worktree-backed agent sessions.
           </div>
         ) : (
           <div className="space-y-1">
@@ -400,16 +456,16 @@ export function Sidebar({
       )}
 
       {!collapsed && (
-        <div className="shrink-0 p-4 border-t border-white/10 flex items-center bg-black/20">
+        <div className="shrink-0 p-4 border-t border-white/10 flex items-center bg-black/20 animate-in fade-in slide-in-from-bottom-2 duration-500 ease-out delay-200">
           <div className="flex w-full bg-white/[0.04] p-1 border border-white/10">
             <button
-              className={`flex-1 text-[10px] font-bold uppercase tracking-widest py-1.5 transition ${globalMode === 'multiplex' ? 'bg-sentinel-accent/20 text-white' : 'text-sentinel-mist hover:text-white'}`}
+              className={`flex-1 text-[10px] font-bold uppercase tracking-widest py-1.5 transition-all duration-200 hover:scale-[1.02] ${globalMode === 'multiplex' ? 'bg-sentinel-accent/20 text-white shadow-[0_0_10px_rgba(255,255,255,0.1)]' : 'text-sentinel-mist hover:text-white hover:bg-white/[0.04]'}`}
               onClick={() => onToggleGlobalMode('multiplex')}
             >
               Multiplex
             </button>
             <button
-              className={`flex-1 text-[10px] font-bold uppercase tracking-widest py-1.5 transition ${globalMode === 'ide' ? 'bg-emerald-500/20 text-white' : 'text-sentinel-mist hover:text-white'}`}
+              className={`flex-1 text-[10px] font-bold uppercase tracking-widest py-1.5 transition-all duration-200 hover:scale-[1.02] ${globalMode === 'ide' ? 'bg-emerald-500/20 text-white shadow-[0_0_10px_rgba(16,185,129,0.2)]' : 'text-sentinel-mist hover:text-white hover:bg-white/[0.04]'}`}
               onClick={() => onToggleGlobalMode('ide')}
             >
               IDE Mode

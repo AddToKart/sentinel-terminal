@@ -1,10 +1,11 @@
 import { Clock3, Cpu, GitBranch, Layers3, MemoryStick, TerminalSquare } from 'lucide-react'
 
-import type { WorkspaceSummary } from '@shared/types'
+import type { SessionWorkspaceStrategy, WorkspaceSummary } from '@shared/types'
 
 interface StatusBarProps {
   summary: WorkspaceSummary
   consoleOpen: boolean
+  defaultSessionStrategy: SessionWorkspaceStrategy
   onToggleConsole: () => void
 }
 
@@ -16,7 +17,12 @@ function formatTime(timestamp: number): string {
   })
 }
 
-export function StatusBar({ summary, consoleOpen, onToggleConsole }: StatusBarProps): JSX.Element {
+export function StatusBar({
+  summary,
+  consoleOpen,
+  defaultSessionStrategy,
+  onToggleConsole
+}: StatusBarProps): JSX.Element {
   return (
     <footer className="border-t border-white/10 bg-black/40 px-6 py-3 backdrop-blur-2xl shadow-[0_-4px_24px_rgba(0,0,0,0.4)]">
       <div className="flex flex-wrap items-center justify-between gap-6 text-xs text-white">
@@ -36,6 +42,12 @@ export function StatusBar({ summary, consoleOpen, onToggleConsole }: StatusBarPr
           <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 shadow-inner">
             <GitBranch className="h-3.5 w-3.5 text-white" />
             <span className="font-mono">{summary.branch || 'No branch selected'}</span>
+          </div>
+          <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 shadow-inner">
+            <TerminalSquare className="h-3.5 w-3.5 text-sentinel-accent" />
+            <span className="font-medium tracking-wide">
+              {defaultSessionStrategy === 'sandbox-copy' ? 'SANDBOX COPY' : 'GIT WORKTREE'}
+            </span>
           </div>
         </div>
 

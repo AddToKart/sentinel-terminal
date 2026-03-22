@@ -1,6 +1,7 @@
 import pidusage, { clear as clearPidusage } from 'pidusage'
 
 import { normalizeSessionPaths, parseGitStatusOutput } from './helpers'
+import { refreshSandboxWorkspaceDiffs } from './sandbox-workspace'
 import type { ProcessTreeSnapshot, RawProcessTreeSnapshot, SessionRecord } from './types'
 import { pathExists, runCommand, runPowerShell } from './commands'
 
@@ -8,18 +9,28 @@ export function clearProcessUsageCache(): void {
   clearPidusage()
 }
 
-export async function collectWorktreeDiffs(records: SessionRecord[]): Promise<Map<string, string[]>> {
+export async function collectWorkspaceDiffs(records: SessionRecord[]): Promise<Map<string, string[]>> {
   const updates = await Promise.all(
     records.map(async (record) => {
-      if (!(await pathExists(record.summary.worktreePath))) {
+      if (!(await pathExists(record.summary.workspacePath))) {
         return [record.summary.id, [] as string[]] as const
+      }
+
+      if (record.summary.workspaceStrategy === 'sandbox-copy' && record.sandboxState) {
+        const sandboxDiffs = await refreshSandboxWorkspaceDiffs(
+          record.summary.workspacePath,
+          record.sandboxState
+        )
+        record.sandboxState.scanCache = sandboxDiffs.nextCache
+
+        return [record.summary.id, sandboxDiffs.modifiedPaths] as const
       }
 
       try {
         const raw = await runCommand(
           'git',
-          ['-C', record.summary.worktreePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
-          record.summary.worktreePath
+          ['-C', record.summary.workspacePath, 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
+          record.summary.workspacePath
         )
 
         return [

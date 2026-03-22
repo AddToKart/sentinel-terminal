@@ -2,6 +2,8 @@ export type SessionStatus = 'starting' | 'ready' | 'closing' | 'closed' | 'error
 
 export type CleanupState = 'active' | 'removed' | 'preserved' | 'failed'
 
+export type SessionWorkspaceStrategy = 'sandbox-copy' | 'git-worktree'
+
 export interface ProcessMetrics {
   cpuPercent: number
   memoryMb: number
@@ -38,8 +40,9 @@ export interface SessionSummary {
   label: string
   projectRoot: string
   cwd: string
-  worktreePath: string
-  branchName: string
+  workspacePath: string
+  workspaceStrategy: SessionWorkspaceStrategy
+  branchName?: string
   status: SessionStatus
   cleanupState: CleanupState
   shell: string
@@ -57,6 +60,7 @@ export interface WorkspaceSummary {
   totalMemoryMb: number
   totalProcesses: number
   lastUpdated: number
+  defaultSessionStrategy: SessionWorkspaceStrategy
   projectPath?: string
   projectName?: string
   branch?: string
@@ -65,7 +69,7 @@ export interface WorkspaceSummary {
 export interface ActivityLogEntry {
   id: string
   timestamp: number
-  scope: 'git'
+  scope: 'git' | 'workspace'
   status: 'started' | 'completed' | 'failed'
   command: string
   cwd: string
@@ -90,6 +94,23 @@ export interface SessionDiffUpdate {
   updatedAt: number
 }
 
+export interface SessionSyncConflict {
+  path: string
+  reason: 'project-changed' | 'project-path-blocked'
+  detail?: string
+}
+
+export interface SessionApplyResult {
+  sessionId: string
+  workspaceStrategy: SessionWorkspaceStrategy
+  appliedPaths: string[]
+  conflicts: SessionSyncConflict[]
+}
+
+export interface WorkspacePreferences {
+  defaultSessionStrategy: SessionWorkspaceStrategy
+}
+
 export interface BootstrapPayload {
   project: ProjectState
   sessions: SessionSummary[]
@@ -98,6 +119,7 @@ export interface BootstrapPayload {
   metrics: SessionMetricsUpdate[]
   histories: SessionHistoryUpdate[]
   diffs: SessionDiffUpdate[]
+  preferences: WorkspacePreferences
 }
 
 export interface CreateSessionInput {
@@ -105,6 +127,7 @@ export interface CreateSessionInput {
   startupCommand?: string
   cols?: number
   rows?: number
+  workspaceStrategy?: SessionWorkspaceStrategy
 }
 
 export interface SessionOutputEvent {
@@ -116,15 +139,17 @@ export interface SentinelApi {
   bootstrap: () => Promise<BootstrapPayload>
   selectProject: () => Promise<ProjectState>
   refreshProject: () => Promise<ProjectState>
+  setDefaultSessionStrategy: (strategy: SessionWorkspaceStrategy) => Promise<WorkspacePreferences>
   createSession: (input?: CreateSessionInput) => Promise<SessionSummary>
   closeSession: (sessionId: string) => Promise<void>
   resizeSession: (sessionId: string, cols: number, rows: number) => Promise<void>
   sendInput: (sessionId: string, data: string) => Promise<void>
   readFile: (filePath: string) => Promise<string>
   readFileDiff: (sessionId: string, filePath: string) => Promise<string>
-  mergeWorktree: (sessionId: string) => Promise<void>
-  commitWorktree: (sessionId: string, message: string) => Promise<void>
-  discardWorktree: (sessionId: string) => Promise<void>
+  writeSessionFile: (sessionId: string, relativePath: string, content: string) => Promise<void>
+  applySession: (sessionId: string) => Promise<SessionApplyResult>
+  commitSession: (sessionId: string, message: string) => Promise<void>
+  discardSessionChanges: (sessionId: string) => Promise<void>
   revealInFileExplorer: (filePath: string) => Promise<void>
   openInSystemEditor: (filePath: string) => Promise<void>
   onSessionOutput: (listener: (event: SessionOutputEvent) => void) => () => void
