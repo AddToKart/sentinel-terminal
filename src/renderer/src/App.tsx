@@ -9,6 +9,7 @@ import { GlobalActionBar } from './components/GlobalActionBar'
 import { SessionTile } from './components/SessionTile'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
+import { clearSessionOutput } from './terminal-stream'
 
 import type {
   ActivityLogEntry,
@@ -57,6 +58,18 @@ export default function App(): JSX.Element {
 
   const sidebarPanelRef = useRef<ImperativePanelHandle | null>(null)
   const shellViewportRef = useRef<HTMLDivElement | null>(null)
+  const fitTimerRef = useRef<number | null>(null)
+
+  function requestTerminalFit(delay = 80) {
+    if (fitTimerRef.current) {
+      window.clearTimeout(fitTimerRef.current)
+    }
+
+    fitTimerRef.current = window.setTimeout(() => {
+      fitTimerRef.current = null
+      setFitNonce((n) => n + 1)
+    }, delay)
+  }
 
   // Bootstrap
   useEffect(() => {
@@ -125,20 +138,23 @@ export default function App(): JSX.Element {
 
   // Global ResizeObserver to re-fit terminals after any layout change
   useEffect(() => {
-    let timer: number | null = null
     const observer = new ResizeObserver(() => {
-      if (timer) clearTimeout(timer)
-      timer = window.setTimeout(() => setFitNonce((n) => n + 1), 80)
+      requestTerminalFit()
     })
     if (shellViewportRef.current) observer.observe(shellViewportRef.current)
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+      if (fitTimerRef.current) {
+        window.clearTimeout(fitTimerRef.current)
+        fitTimerRef.current = null
+      }
+    }
   }, [])
 
   // Trigger a re-fit when sidebar or console changes
   useEffect(() => {
-    const timer = window.setTimeout(() => setFitNonce((n) => n + 1), 120)
-    return () => clearTimeout(timer)
-  }, [sidebarCollapsed, consoleOpen, globalMode])
+    requestTerminalFit(120)
+  }, [sidebarCollapsed, consoleOpen, globalMode, sessions.length, maximizedSessionId])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -183,6 +199,7 @@ export default function App(): JSX.Element {
     if (maximizedSessionId === sessionId) setMaximizedSessionId(null)
     try {
       await window.sentinel.closeSession(sessionId)
+      clearSessionOutput(sessionId)
       setSessions((cur) => cur.filter((session) => session.id !== sessionId))
       setSessionHistories((cur) => {
         const next = { ...cur }
@@ -231,6 +248,75 @@ export default function App(): JSX.Element {
 
   // The active IDE session (for the bottom tray)
   const ideSession = sessions.find((s) => s.id === maximizedSessionId) ?? sessions[0] ?? null
+
+  const multiplexContent = !hasProject ? (
+    <div className="flex h-full items-center justify-center">
+      <div className="max-w-xs text-center p-8 border border-white/10 bg-white/[0.02]">
+        <FolderOpen className="mx-auto mb-4 h-10 w-10 text-sentinel-mist/40" />
+        <h2 className="mb-2 text-base font-bold text-white/90">Open a Repository</h2>
+        <p className="mb-6 text-sm text-sentinel-mist">Select a project folder to start sandbox-copy or Git worktree agent sessions.</p>
+        <button
+          className="inline-flex h-9 w-full items-center justify-center gap-2 bg-white text-sm font-bold text-sentinel-ink hover:bg-white/90 transition"
+          onClick={() => void handleOpenProject()}
+        >
+          Open Project
+        </button>
+      </div>
+    </div>
+  ) : sessions.length === 0 ? (
+    <div className="flex h-full items-center justify-center text-center text-sentinel-mist">
+      <div>
+        <TerminalSquare className="mx-auto mb-4 h-10 w-10 opacity-30" />
+        <p className="text-sm">No active agents yet. Start one with <strong className="text-white">New Agent</strong> using the workspace strategy selected in the sidebar.</p>
+      </div>
+    </div>
+  ) : (
+    <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-sentinel-mist">Loading...</div>}>
+      <AgentDashboard
+        fitNonce={fitNonce}
+        histories={sessionHistories}
+        sessionDiffs={sessionDiffs}
+        maximizedSessionId={maximizedSessionId}
+        onClose={handleCloseSession}
+        onToggleMaximize={(id) => setMaximizedSessionId((c) => c === id ? null : id)}
+        sessions={sessions}
+      />
+    </Suspense>
+  )
+
+  const ideContent = (
+    <PanelGroup direction="vertical" autoSaveId="sentinel-ide-layout">
+      <Panel defaultSize={65} minSize={20} className="min-h-0">
+        <CodePreview
+          filePath={selectedFilePath}
+          projectPath={project.path}
+          sessions={sessions}
+          onClose={() => setSelectedFilePath(null)}
+        />
+      </Panel>
+      <PanelResizeHandle className="h-[3px] bg-transparent hover:bg-sentinel-accent/20 active:bg-sentinel-accent/40 transition-colors cursor-row-resize" />
+      <Panel defaultSize={35} minSize={10} className="min-h-0">
+        {ideSession ? (
+          <SessionTile
+            session={ideSession}
+            historyEntries={sessionHistories[ideSession.id] ?? []}
+            modifiedPaths={sessionDiffs[ideSession.id] ?? []}
+            isMaximized={false}
+            onClose={handleCloseSession}
+            onToggleMaximize={(id) => setMaximizedSessionId((c) => c === id ? null : id)}
+            applySession={() => window.sentinel.applySession(ideSession.id)}
+            commitSession={(msg) => window.sentinel.commitSession(ideSession.id, msg)}
+            discardSessionChanges={() => window.sentinel.discardSessionChanges(ideSession.id)}
+            fitNonce={fitNonce}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-sentinel-mist bg-[#060a0f] border-t border-white/10">
+            No active agents
+          </div>
+        )}
+      </Panel>
+    </PanelGroup>
+  )
 
   return (
     <div className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-[#060a0f] text-white select-none">
@@ -335,91 +421,8 @@ export default function App(): JSX.Element {
           <PanelResizeHandle className="relative w-[3px] bg-transparent hover:bg-sentinel-accent/20 active:bg-sentinel-accent/40 transition-colors" />
 
           <Panel className="flex flex-col min-h-0 min-w-0" defaultSize={82}>
-            {/* Main workspace — both layouts stay mounted, CSS controls visibility */}
-            <div className="flex-1 min-h-0 relative overflow-hidden">
-
-              {/* ---- MULTIPLEX MODE ---- */}
-              <div
-                className={`absolute inset-0 transition-opacity duration-200 ${
-                  globalMode === 'multiplex' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
-                }`}
-              >
-                {!hasProject ? (
-                  <div className="flex h-full items-center justify-center">
-                    <div className="max-w-xs text-center p-8 border border-white/10 bg-white/[0.02]">
-                      <FolderOpen className="mx-auto mb-4 h-10 w-10 text-sentinel-mist/40" />
-                      <h2 className="mb-2 text-base font-bold text-white/90">Open a Repository</h2>
-                      <p className="mb-6 text-sm text-sentinel-mist">Select a project folder to start sandbox-copy or Git worktree agent sessions.</p>
-                      <button
-                        className="inline-flex h-9 w-full items-center justify-center gap-2 bg-white text-sm font-bold text-sentinel-ink hover:bg-white/90 transition"
-                        onClick={() => void handleOpenProject()}
-                      >
-                        Open Project
-                      </button>
-                    </div>
-                  </div>
-                ) : sessions.length === 0 ? (
-                  <div className="flex h-full items-center justify-center text-center text-sentinel-mist">
-                    <div>
-                      <TerminalSquare className="mx-auto mb-4 h-10 w-10 opacity-30" />
-                      <p className="text-sm">No active agents yet. Start one with <strong className="text-white">New Agent</strong> using the workspace strategy selected in the sidebar.</p>
-                    </div>
-                  </div>
-                ) : (
-                  <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-sentinel-mist">Loading...</div>}>
-                    <AgentDashboard
-                      fitNonce={fitNonce}
-                      histories={sessionHistories}
-                      sessionDiffs={sessionDiffs}
-                      maximizedSessionId={maximizedSessionId}
-                      onClose={handleCloseSession}
-                      onToggleMaximize={(id) => setMaximizedSessionId((c) => c === id ? null : id)}
-                      sessions={sessions}
-                    />
-                  </Suspense>
-                )}
-              </div>
-
-              {/* ---- IDE MODE ---- */}
-              <div
-                className={`absolute inset-0 transition-opacity duration-200 ${
-                  globalMode === 'ide' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
-                }`}
-              >
-                <PanelGroup direction="vertical" autoSaveId="sentinel-ide-layout">
-                  {/* Top: Monaco Editor */}
-                  <Panel defaultSize={65} minSize={20} className="min-h-0">
-                    <CodePreview
-                      filePath={selectedFilePath}
-                      projectPath={project.path}
-                      sessions={sessions}
-                      onClose={() => setSelectedFilePath(null)}
-                    />
-                  </Panel>
-                  <PanelResizeHandle className="h-[3px] bg-transparent hover:bg-sentinel-accent/20 active:bg-sentinel-accent/40 transition-colors cursor-row-resize" />
-                  {/* Bottom: Terminal tray */}
-                  <Panel defaultSize={35} minSize={10} className="min-h-0">
-                    {ideSession ? (
-                      <SessionTile
-                        session={ideSession}
-                        historyEntries={sessionHistories[ideSession.id] ?? []}
-                        modifiedPaths={sessionDiffs[ideSession.id] ?? []}
-                        isMaximized={false}
-                        onClose={handleCloseSession}
-                        onToggleMaximize={(id) => setMaximizedSessionId((c) => c === id ? null : id)}
-                        applySession={() => window.sentinel.applySession(ideSession.id)}
-                        commitSession={(msg) => window.sentinel.commitSession(ideSession.id, msg)}
-                        discardSessionChanges={() => window.sentinel.discardSessionChanges(ideSession.id)}
-                        fitNonce={fitNonce}
-                      />
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-sm text-sentinel-mist bg-[#060a0f] border-t border-white/10">
-                        No active agents
-                      </div>
-                    )}
-                  </Panel>
-                </PanelGroup>
-              </div>
+            <div className="flex-1 min-h-0 overflow-hidden">
+              {globalMode === 'multiplex' ? multiplexContent : ideContent}
             </div>
 
             {/* ---- STATUS BAR ---- */}

@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 
 import type { SessionApplyResult, SessionCommandEntry, SessionSummary } from '@shared/types'
+import { subscribeToSessionOutput } from '../terminal-stream'
 
 interface SessionTileProps {
   session: SessionSummary
@@ -71,6 +72,12 @@ export function SessionTile({
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
   const hasWrittenExitRef = useRef(false)
+  const viewModeRef = useRef<'terminal' | 'history' | 'review'>('terminal')
+  const writeQueueRef = useRef<string[]>([])
+  const writeFrameRef = useRef<number | null>(null)
+  const writeInFlightRef = useRef(false)
+  const fitFrameRef = useRef<number | null>(null)
+  const lastGeometryRef = useRef({ width: 0, height: 0, cols: 0, rows: 0 })
 
   const [viewMode, setViewMode] = useState<'terminal' | 'history' | 'review'>('terminal')
   const [historyQuery, setHistoryQuery] = useState('')
@@ -79,18 +86,109 @@ export function SessionTile({
   const [originalContent, setOriginalContent] = useState('')
   const [modifiedContent, setModifiedContent] = useState('')
 
+  useEffect(() => {
+    viewModeRef.current = viewMode
+  }, [viewMode])
+
+  function scheduleWriteFlush(): void {
+    if (writeFrameRef.current !== null) {
+      return
+    }
+
+    writeFrameRef.current = requestAnimationFrame(() => {
+      writeFrameRef.current = null
+
+      const terminal = terminalRef.current
+      if (!terminal || writeInFlightRef.current || writeQueueRef.current.length === 0) {
+        return
+      }
+
+      const chunk = writeQueueRef.current.join('')
+      writeQueueRef.current = []
+      writeInFlightRef.current = true
+
+      terminal.write(chunk, () => {
+        writeInFlightRef.current = false
+        if (writeQueueRef.current.length > 0) {
+          scheduleWriteFlush()
+        }
+      })
+    })
+  }
+
+  function enqueueOutput(data: string): void {
+    if (!data) {
+      return
+    }
+
+    writeQueueRef.current.push(data)
+    scheduleWriteFlush()
+  }
+
+  function scheduleTerminalFit(): void {
+    if (fitFrameRef.current !== null) {
+      return
+    }
+
+    fitFrameRef.current = requestAnimationFrame(() => {
+      fitFrameRef.current = null
+
+      if (viewModeRef.current !== 'terminal') {
+        return
+      }
+
+      const host = terminalHostRef.current
+      const terminal = terminalRef.current
+      const fitAddon = fitAddonRef.current
+
+      if (!host || !terminal || !fitAddon) {
+        return
+      }
+
+      const width = host.clientWidth
+      const height = host.clientHeight
+      if (width < 8 || height < 8) {
+        return
+      }
+
+      fitAddon.fit()
+
+      const cols = terminal.cols
+      const rows = terminal.rows
+      if (cols <= 0 || rows <= 0) {
+        return
+      }
+
+      const lastGeometry = lastGeometryRef.current
+      if (
+        lastGeometry.width === width &&
+        lastGeometry.height === height &&
+        lastGeometry.cols === cols &&
+        lastGeometry.rows === rows
+      ) {
+        return
+      }
+
+      lastGeometryRef.current = { width, height, cols, rows }
+      void window.sentinel.resizeSession(session.id, cols, rows)
+    })
+  }
+
   // Terminal initialization
   useEffect(() => {
     if (!terminalHostRef.current) return
 
     const terminal = new Terminal({
       allowTransparency: true,
-      convertEol: true,
+      convertEol: false,
       cursorBlink: true,
+      customGlyphs: true,
       fontFamily: 'JetBrains Mono, Cascadia Code, Consolas, monospace',
       fontSize: 13,
       lineHeight: 1.2,
       scrollback: 6000,
+      smoothScrollDuration: 0,
+      windowsPty: { backend: 'conpty' },
       theme: { background: '#060a0f', black: '#060a0f' }
     })
 
@@ -105,8 +203,8 @@ export function SessionTile({
     terminal.writeln(`\x1b[38;2;143;165;184mPID:\x1b[0m ${session.pid ?? '--'}`)
     terminal.writeln('')
 
-    const outputCleanup = window.sentinel.onSessionOutput((ev) => {
-      if (ev.sessionId === session.id) terminal.write(ev.data)
+    const outputCleanup = subscribeToSessionOutput(session.id, (data) => {
+      enqueueOutput(data)
     })
 
     const inputDisposable = terminal.onData((data) => {
@@ -114,16 +212,12 @@ export function SessionTile({
     })
 
     const observer = new ResizeObserver(() => {
-      if (terminalHostRef.current?.offsetParent) {
-        fitAddon.fit()
-        void window.sentinel.resizeSession(session.id, terminal.cols, terminal.rows)
-      }
+      scheduleTerminalFit()
     })
     observer.observe(terminalHostRef.current)
 
     requestAnimationFrame(() => {
-      fitAddon.fit()
-      terminal.focus()
+      scheduleTerminalFit()
     })
 
     terminalRef.current = terminal
@@ -133,19 +227,28 @@ export function SessionTile({
       observer.disconnect()
       outputCleanup()
       inputDisposable.dispose()
+      if (writeFrameRef.current !== null) {
+        cancelAnimationFrame(writeFrameRef.current)
+        writeFrameRef.current = null
+      }
+      if (fitFrameRef.current !== null) {
+        cancelAnimationFrame(fitFrameRef.current)
+        fitFrameRef.current = null
+      }
+      writeQueueRef.current = []
+      writeInFlightRef.current = false
+      lastGeometryRef.current = { width: 0, height: 0, cols: 0, rows: 0 }
       terminal.dispose()
       terminalRef.current = null
       fitAddonRef.current = null
     }
-  }, [session.id, session.branchName, session.label, session.pid, session.workspaceStrategy])
+  }, [session.id])
 
   // Re-fit on nonce/mode change
   useEffect(() => {
     if (viewMode !== 'terminal' || !terminalRef.current || !fitAddonRef.current) return
     requestAnimationFrame(() => {
-      fitAddonRef.current?.fit()
-      terminalRef.current?.focus()
-      void window.sentinel.resizeSession(session.id, terminalRef.current?.cols ?? 0, terminalRef.current?.rows ?? 0)
+      scheduleTerminalFit()
     })
   }, [session.id, fitNonce, viewMode])
 
@@ -153,8 +256,8 @@ export function SessionTile({
   useEffect(() => {
     if (session.status !== 'closed') { hasWrittenExitRef.current = false; return }
     if (!terminalRef.current || hasWrittenExitRef.current) return
-    terminalRef.current.writeln(`\n\x1b[38;2;255;170;170mSession exited (code ${session.exitCode ?? 0} · ${cleanupLabel(session)})\x1b[0m`)
-    if (session.error) terminalRef.current.writeln(`\x1b[38;2;143;165;184m${session.error}\x1b[0m`)
+    enqueueOutput(`\r\n\x1b[38;2;255;170;170mSession exited (code ${session.exitCode ?? 0} · ${cleanupLabel(session)})\x1b[0m\r\n`)
+    if (session.error) enqueueOutput(`\x1b[38;2;143;165;184m${session.error}\x1b[0m\r\n`)
     hasWrittenExitRef.current = true
   }, [session])
 
@@ -193,15 +296,15 @@ export function SessionTile({
       if (op === 'apply') {
         const result = await applySession()
         if (result.conflicts.length > 0) {
-          terminalRef.current?.writeln(`\n\x1b[38;2;255;170;170mApply completed with ${result.conflicts.length} conflict(s).\x1b[0m`)
+          enqueueOutput(`\r\n\x1b[38;2;255;170;170mApply completed with ${result.conflicts.length} conflict(s).\x1b[0m\r\n`)
           for (const conflict of result.conflicts.slice(0, 8)) {
-            terminalRef.current?.writeln(`\x1b[38;2;143;165;184mconflict:\x1b[0m ${conflict.path}`)
+            enqueueOutput(`\x1b[38;2;143;165;184mconflict:\x1b[0m ${conflict.path}\r\n`)
           }
           if (result.conflicts.length > 8) {
-            terminalRef.current?.writeln(`\x1b[38;2;143;165;184m...and ${result.conflicts.length - 8} more\x1b[0m`)
+            enqueueOutput(`\x1b[38;2;143;165;184m...and ${result.conflicts.length - 8} more\x1b[0m\r\n`)
           }
         } else {
-          terminalRef.current?.writeln(`\n\x1b[38;2;140;245;221mApplied ${result.appliedPaths.length} file(s) back to the main project.\x1b[0m`)
+          enqueueOutput(`\r\n\x1b[38;2;140;245;221mApplied ${result.appliedPaths.length} file(s) back to the main project.\x1b[0m\r\n`)
         }
       }
       if (op === 'commit') {
@@ -217,7 +320,7 @@ export function SessionTile({
         if (confirmed) await discardSessionChanges()
       }
     } catch (e: any) {
-      terminalRef.current?.writeln(`\n\x1b[38;2;255;170;170mOp failed: ${e.message}\x1b[0m\n`)
+      enqueueOutput(`\r\n\x1b[38;2;255;170;170mOp failed: ${e.message}\x1b[0m\r\n`)
     } finally {
       setOpLoading(null)
     }
