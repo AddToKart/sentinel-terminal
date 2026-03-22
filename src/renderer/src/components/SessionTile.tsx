@@ -21,7 +21,7 @@ import {
 } from 'lucide-react'
 
 import type { SessionApplyResult, SessionCommandEntry, SessionSummary } from '@shared/types'
-import { createTerminalOptions, installTerminalMaintenance } from '../terminal-config'
+import { createTerminalOptions, installTerminalMaintenance, refreshTerminalSurface } from '../terminal-config'
 import { subscribeToSessionOutput } from '../terminal-stream'
 
 interface SessionTileProps {
@@ -150,6 +150,7 @@ export function SessionTile({
     }
 
     fitAddon.fit()
+    refreshTerminalSurface(terminal)
 
     const cols = terminal.cols
     const rows = terminal.rows
@@ -314,6 +315,9 @@ export function SessionTile({
   useEffect(() => {
     if (viewMode !== 'terminal' || !terminalRef.current || !fitAddonRef.current) return
     scheduleTerminalFit(60)
+    requestAnimationFrame(() => {
+      if (terminalRef.current) refreshTerminalSurface(terminalRef.current)
+    })
   }, [session.id, fitNonce, viewMode])
 
   useEffect(() => {
@@ -323,6 +327,7 @@ export function SessionTile({
 
     requestAnimationFrame(() => {
       scheduleTerminalFocus()
+      if (terminalRef.current) refreshTerminalSurface(terminalRef.current)
     })
   }, [viewMode])
 

@@ -4,7 +4,7 @@ import { Terminal } from '@xterm/xterm'
 import { CheckCheck, LoaderCircle, RefreshCw, RotateCcw, TerminalSquare } from 'lucide-react'
 
 import type { IdeTerminalState } from '@shared/types'
-import { createTerminalOptions, installTerminalMaintenance } from '../terminal-config'
+import { createTerminalOptions, installTerminalMaintenance, refreshTerminalSurface } from '../terminal-config'
 import { clearIdeTerminalOutput, subscribeToIdeTerminalOutput } from '../terminal-stream'
 
 interface IdeTerminalPanelProps {
@@ -106,6 +106,7 @@ export function IdeTerminalPanel({
     }
 
     fitAddon.fit()
+    refreshTerminalSurface(terminal)
 
     const cols = terminal.cols
     const rows = terminal.rows
@@ -292,6 +293,9 @@ export function IdeTerminalPanel({
 
   useEffect(() => {
     scheduleTerminalFit(60)
+    requestAnimationFrame(() => {
+      if (terminalRef.current) refreshTerminalSurface(terminalRef.current)
+    })
   }, [fitNonce])
 
   useEffect(() => {

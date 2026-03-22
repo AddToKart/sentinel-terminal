@@ -24,28 +24,32 @@ export function createTerminalOptions(windowsBuildNumber?: number): TerminalOpti
   }
 }
 
+export function refreshTerminalSurface(terminal: Terminal): void {
+  terminal.clearTextureAtlas()
+  if (terminal.rows > 0) {
+    terminal.refresh(0, Math.max(terminal.rows - 1, 0))
+  }
+}
+
 export function installTerminalMaintenance(
   terminal: Terminal,
   isActive: () => boolean
 ): () => void {
-  function refreshTerminalSurface(): void {
+  function maybeRefresh(): void {
     if (!isActive()) {
       return
     }
 
-    terminal.clearTextureAtlas()
-    if (terminal.rows > 0) {
-      terminal.refresh(0, Math.max(terminal.rows - 1, 0))
-    }
+    refreshTerminalSurface(terminal)
   }
 
   const intervalId = window.setInterval(() => {
-    refreshTerminalSurface()
-  }, 90_000)
+    maybeRefresh()
+  }, 3_000)
 
   const handleWindowFocus = (): void => {
     requestAnimationFrame(() => {
-      refreshTerminalSurface()
+      maybeRefresh()
     })
   }
 
@@ -55,7 +59,7 @@ export function installTerminalMaintenance(
     }
 
     requestAnimationFrame(() => {
-      refreshTerminalSurface()
+      maybeRefresh()
     })
   }
 
