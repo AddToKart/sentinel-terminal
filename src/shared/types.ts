@@ -111,6 +111,18 @@ export interface WorkspacePreferences {
   defaultSessionStrategy: SessionWorkspaceStrategy
 }
 
+export interface IdeTerminalState {
+  status: 'idle' | SessionStatus
+  cwd?: string
+  workspacePath?: string
+  shell: string
+  pid?: number
+  createdAt?: number
+  exitCode?: number | null
+  error?: string
+  modifiedPaths: string[]
+}
+
 export interface BootstrapPayload {
   project: ProjectState
   sessions: SessionSummary[]
@@ -120,6 +132,7 @@ export interface BootstrapPayload {
   histories: SessionHistoryUpdate[]
   diffs: SessionDiffUpdate[]
   preferences: WorkspacePreferences
+  ideTerminal: IdeTerminalState
 }
 
 export interface CreateSessionInput {
@@ -135,6 +148,10 @@ export interface SessionOutputEvent {
   data: string
 }
 
+export interface IdeTerminalOutputEvent {
+  data: string
+}
+
 export interface SentinelApi {
   bootstrap: () => Promise<BootstrapPayload>
   selectProject: () => Promise<ProjectState>
@@ -144,6 +161,12 @@ export interface SentinelApi {
   closeSession: (sessionId: string) => Promise<void>
   resizeSession: (sessionId: string, cols: number, rows: number) => Promise<void>
   sendInput: (sessionId: string, data: string) => Promise<void>
+  ensureIdeTerminal: () => Promise<IdeTerminalState>
+  resizeIdeTerminal: (cols: number, rows: number) => Promise<void>
+  sendIdeTerminalInput: (data: string) => Promise<void>
+  writeIdeFile: (relativePath: string, content: string) => Promise<void>
+  applyIdeWorkspace: () => Promise<SessionApplyResult>
+  discardIdeWorkspaceChanges: () => Promise<void>
   readFile: (filePath: string) => Promise<string>
   readFileDiff: (sessionId: string, filePath: string) => Promise<string>
   writeSessionFile: (sessionId: string, relativePath: string, content: string) => Promise<void>
@@ -153,7 +176,9 @@ export interface SentinelApi {
   revealInFileExplorer: (filePath: string) => Promise<void>
   openInSystemEditor: (filePath: string) => Promise<void>
   onSessionOutput: (listener: (event: SessionOutputEvent) => void) => () => void
+  onIdeTerminalOutput: (listener: (event: IdeTerminalOutputEvent) => void) => () => void
   onSessionState: (listener: (session: SessionSummary) => void) => () => void
+  onIdeTerminalState: (listener: (state: IdeTerminalState) => void) => () => void
   onSessionMetrics: (listener: (payload: SessionMetricsUpdate) => void) => () => void
   onSessionHistory: (listener: (payload: SessionHistoryUpdate) => void) => () => void
   onSessionDiff: (listener: (payload: SessionDiffUpdate) => void) => () => void

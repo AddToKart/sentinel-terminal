@@ -11,6 +11,7 @@ import type {
   ActivityLogEntry,
   BootstrapPayload,
   CreateSessionInput,
+  IdeTerminalState,
   ProjectState,
   SessionApplyResult,
   SessionCommandEntry,
@@ -51,7 +52,7 @@ import {
   collectProcessTreeSnapshots,
   collectWorkspaceDiffs
 } from './runtime-monitor'
-import type { ManagerEvents, ProcessTreeSnapshot, SessionRecord } from './types'
+import type { IdeTerminalRecord, ManagerEvents, ProcessTreeSnapshot, SessionRecord } from './types'
 
 function resolveWorkspaceFilePath(workspacePath: string, relativePath: string): string {
   const normalizedRelativePath = normalizeRelativePath(relativePath)
@@ -73,6 +74,15 @@ export class SessionManager extends EventEmitter {
   private readonly pidRegistry = new Map<string, Set<number>>()
   private readonly metricsTimer: NodeJS.Timeout
   private readonly activityLog: ActivityLogEntry[] = []
+  private ideTerminalRecord: IdeTerminalRecord | null = null
+  private ideTerminalState: IdeTerminalState = {
+    status: 'idle',
+    shell: 'powershell.exe',
+    modifiedPaths: []
+  }
+  private ideWorkspacePath?: string
+  private ideWorkspaceProjectRoot?: string
+  private ideSandboxState?: SessionRecord['sandboxState']
   private refreshInFlight = false
   private projectState: ProjectState = createEmptyProject()
   private preferences: WorkspacePreferences = {
@@ -125,7 +135,8 @@ export class SessionManager extends EventEmitter {
       metrics: this.listSessionMetrics(),
       histories: this.listSessionHistories(),
       diffs: this.listSessionDiffs(),
-      preferences: structuredClone(this.preferences)
+      preferences: structuredClone(this.preferences),
+      ideTerminal: structuredClone(this.ideTerminalState)
     }
   }
 
@@ -174,13 +185,30 @@ export class SessionManager extends EventEmitter {
       isGitRepo = false
     }
 
-    this.projectState = {
+    const nextProjectState: ProjectState = {
       path: projectRoot,
       name: path.basename(projectRoot),
       branch: branch || undefined,
       isGitRepo,
       tree: await buildProjectTree(projectRoot)
     }
+
+    const ideTerminalNeedsRestart =
+      this.ideTerminalRecord &&
+      path.resolve(this.ideTerminalRecord.state.cwd || '') !== nextProjectState.path
+
+    if (ideTerminalNeedsRestart) {
+      await this.closeIdeTerminal()
+    }
+
+    if (
+      this.ideWorkspaceProjectRoot &&
+      path.resolve(this.ideWorkspaceProjectRoot) !== path.resolve(projectRoot)
+    ) {
+      await this.cleanupIdeWorkspace()
+    }
+
+    this.projectState = nextProjectState
 
     this.emitWorkspaceState()
     return structuredClone(this.projectState)
@@ -302,6 +330,150 @@ export class SessionManager extends EventEmitter {
 
     this.trackCommandInput(record, data)
     record.terminal.write(data)
+  }
+
+  async ensureIdeTerminal(): Promise<IdeTerminalState> {
+    const projectPath = this.projectState.path
+    if (!projectPath) {
+      this.ideTerminalState = this.createIdleIdeTerminalState()
+      this.emitIdeTerminalState()
+      return structuredClone(this.ideTerminalState)
+    }
+
+    const workspace = await this.ensureIdeWorkspace()
+
+    const activeRecord = this.ideTerminalRecord
+    if (
+      activeRecord &&
+      path.resolve(activeRecord.state.cwd || '') === path.resolve(workspace.workspacePath) &&
+      activeRecord.state.status !== 'closed' &&
+      activeRecord.state.status !== 'error'
+    ) {
+      return structuredClone(activeRecord.state)
+    }
+
+    if (activeRecord) {
+      await this.closeIdeTerminal()
+    }
+
+    return this.spawnIdeTerminal(workspace.workspacePath, workspace.modifiedPaths)
+  }
+
+  async sendIdeTerminalInput(data: string): Promise<void> {
+    const record = this.ideTerminalRecord
+    if (!record) {
+      await this.ensureIdeTerminal()
+    }
+
+    this.ideTerminalRecord?.terminal.write(data)
+  }
+
+  async resizeIdeTerminal(cols: number, rows: number): Promise<void> {
+    if (cols <= 0 || rows <= 0) {
+      return
+    }
+
+    if (!this.ideTerminalRecord) {
+      await this.ensureIdeTerminal()
+    }
+
+    this.ideTerminalRecord?.terminal.resize(cols, rows)
+  }
+
+  async writeIdeFile(relativePath: string, content: string): Promise<void> {
+    const workspace = await this.ensureIdeWorkspace()
+    await writeSandboxFile(workspace.workspacePath, relativePath, content)
+    await this.refreshIdeWorkspaceDiffs()
+  }
+
+  async applyIdeWorkspace(): Promise<SessionApplyResult> {
+    const workspace = await this.ensureIdeWorkspace()
+    const projectPath = this.projectState.path
+    if (!projectPath || !workspace.sandboxState) {
+      throw new Error('IDE workspace is unavailable.')
+    }
+
+    this.pushActivityLog({
+      scope: 'workspace',
+      status: 'started',
+      command: 'Apply IDE workspace changes to project',
+      cwd: workspace.workspacePath
+    })
+
+    try {
+      const applied = await applySandboxWorkspace(
+        'ide-workspace',
+        projectPath,
+        workspace.workspacePath,
+        workspace.sandboxState
+      )
+
+      this.ideSandboxState = {
+        ...workspace.sandboxState,
+        baselineHashes: applied.nextBaselineHashes,
+        scanCache: applied.nextCache
+      }
+
+      await this.refreshIdeWorkspaceDiffs()
+      await this.refreshProject()
+
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: applied.result.conflicts.length > 0 ? 'failed' : 'completed',
+        command: 'Apply IDE workspace changes to project',
+        cwd: workspace.workspacePath,
+        detail:
+          applied.result.conflicts.length > 0
+            ? `${applied.result.appliedPaths.length} applied, ${applied.result.conflicts.length} conflicts`
+            : `${applied.result.appliedPaths.length} file(s) applied`
+      })
+
+      return applied.result
+    } catch (error) {
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'failed',
+        command: 'Apply IDE workspace changes to project',
+        cwd: workspace.workspacePath,
+        detail: error instanceof Error ? error.message : 'IDE workspace apply failed.'
+      })
+      throw error
+    }
+  }
+
+  async discardIdeWorkspaceChanges(): Promise<void> {
+    const workspace = await this.ensureIdeWorkspace()
+    const projectPath = this.projectState.path
+    if (!projectPath) {
+      throw new Error('Project is unavailable.')
+    }
+
+    this.pushActivityLog({
+      scope: 'workspace',
+      status: 'started',
+      command: 'Discard IDE workspace changes',
+      cwd: workspace.workspacePath
+    })
+
+    try {
+      this.ideSandboxState = await discardSandboxWorkspace(projectPath, workspace.workspacePath)
+      await this.refreshIdeWorkspaceDiffs()
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'completed',
+        command: 'Discard IDE workspace changes',
+        cwd: workspace.workspacePath
+      })
+    } catch (error) {
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'failed',
+        command: 'Discard IDE workspace changes',
+        cwd: workspace.workspacePath,
+        detail: error instanceof Error ? error.message : 'IDE workspace discard failed.'
+      })
+      throw error
+    }
   }
 
   async readFile(filePath: string): Promise<string> {
@@ -531,6 +703,47 @@ export class SessionManager extends EventEmitter {
     this.removeSession(sessionId)
   }
 
+  private async closeIdeTerminal(): Promise<void> {
+    const record = this.ideTerminalRecord
+    if (!record) {
+      return
+    }
+
+    if (!record.closeRequested) {
+      record.closeRequested = true
+
+      if (
+        record.state.status === 'starting' ||
+        record.state.status === 'ready' ||
+        record.state.status === 'error'
+      ) {
+        record.state.status = 'closing'
+        record.state.error = undefined
+        this.ideTerminalState = { ...record.state }
+        this.emitIdeTerminalState()
+      }
+
+      await this.terminateProcessId(record.state.pid)
+
+      try {
+        record.terminal.kill()
+      } catch {
+        // The PTY may already be shutting down.
+      }
+    }
+
+    const closedInTime = await Promise.race([
+      record.closePromise.then(() => true),
+      delay(CLOSE_TIMEOUT_MS).then(() => false)
+    ])
+
+    if (!closedInTime) {
+      await this.finalizeIdeTerminal(record, record.state.exitCode ?? null, {
+        error: 'Sentinel forced the IDE terminal to close after the shell stopped responding.'
+      })
+    }
+  }
+
   dispose(): void {
     clearInterval(this.metricsTimer)
     clearProcessUsageCache()
@@ -541,6 +754,17 @@ export class SessionManager extends EventEmitter {
 
       try {
         record.terminal.kill()
+      } catch {
+        // Ignore teardown errors while the app is closing.
+      }
+    }
+
+    if (this.ideTerminalRecord) {
+      this.ideTerminalRecord.closeRequested = true
+      void this.terminateProcessId(this.ideTerminalRecord.state.pid)
+
+      try {
+        this.ideTerminalRecord.terminal.kill()
       } catch {
         // Ignore teardown errors while the app is closing.
       }
@@ -928,6 +1152,252 @@ export class SessionManager extends EventEmitter {
     this.emitWorkspaceState()
   }
 
+  private createIdleIdeTerminalState(): IdeTerminalState {
+    return {
+      status: 'idle',
+      shell: 'powershell.exe',
+      cwd: this.ideWorkspacePath ?? this.projectState.path,
+      workspacePath: this.ideWorkspacePath,
+      modifiedPaths: this.ideTerminalState.modifiedPaths
+    }
+  }
+
+  private emitIdeTerminalState(): void {
+    this.emit('ide-terminal-state', structuredClone(this.ideTerminalState))
+  }
+
+  private async ensureIdeWorkspace(): Promise<{
+    workspacePath: string
+    sandboxState: NonNullable<SessionRecord['sandboxState']>
+    modifiedPaths: string[]
+  }> {
+    const projectRoot = this.projectState.path
+    if (!projectRoot) {
+      throw new Error('Open a project folder before using IDE mode.')
+    }
+
+    if (
+      this.ideWorkspacePath &&
+      this.ideWorkspaceProjectRoot &&
+      this.ideSandboxState &&
+      path.resolve(this.ideWorkspaceProjectRoot) === path.resolve(projectRoot)
+    ) {
+      return {
+        workspacePath: this.ideWorkspacePath,
+        sandboxState: this.ideSandboxState,
+        modifiedPaths: this.ideTerminalState.modifiedPaths
+      }
+    }
+
+    if (this.ideWorkspacePath) {
+      await this.cleanupIdeWorkspace()
+    }
+
+    const projectName = sanitizeSegment(this.projectState.name || 'project')
+    const sessionStamp = createTimestamp()
+    const token = createToken()
+    const tempRoot = path.join(os.tmpdir(), 'sentinel-ide', projectName)
+    const workspacePath = path.join(tempRoot, `ide-${sessionStamp}-${token}`)
+
+    await fs.mkdir(tempRoot, { recursive: true })
+    this.pushActivityLog({
+      scope: 'workspace',
+      status: 'started',
+      command: 'Create IDE workspace',
+      cwd: workspacePath
+    })
+
+    try {
+      const sandboxState = await createSandboxWorkspace(projectRoot, workspacePath)
+      this.ideWorkspacePath = workspacePath
+      this.ideWorkspaceProjectRoot = projectRoot
+      this.ideSandboxState = sandboxState
+      this.ideTerminalState = {
+        ...this.ideTerminalState,
+        cwd: workspacePath,
+        workspacePath,
+        modifiedPaths: []
+      }
+      this.emitIdeTerminalState()
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'completed',
+        command: 'Create IDE workspace',
+        cwd: workspacePath
+      })
+
+      return {
+        workspacePath,
+        sandboxState,
+        modifiedPaths: []
+      }
+    } catch (error) {
+      this.pushActivityLog({
+        scope: 'workspace',
+        status: 'failed',
+        command: 'Create IDE workspace',
+        cwd: workspacePath,
+        detail: error instanceof Error ? error.message : 'IDE workspace creation failed.'
+      })
+      throw error
+    }
+  }
+
+  private async refreshIdeWorkspaceDiffs(): Promise<void> {
+    if (!(this.ideWorkspacePath && this.ideSandboxState)) {
+      return
+    }
+
+    const refreshed = await refreshSandboxWorkspaceDiffs(this.ideWorkspacePath, this.ideSandboxState)
+    this.ideSandboxState = {
+      ...this.ideSandboxState,
+      scanCache: refreshed.nextCache
+    }
+
+    if (!arrayEquals(this.ideTerminalState.modifiedPaths, refreshed.modifiedPaths)) {
+      this.ideTerminalState = {
+        ...this.ideTerminalState,
+        cwd: this.ideWorkspacePath,
+        workspacePath: this.ideWorkspacePath,
+        modifiedPaths: refreshed.modifiedPaths
+      }
+      this.emitIdeTerminalState()
+    }
+  }
+
+  private async cleanupIdeWorkspace(): Promise<void> {
+    const workspacePath = this.ideWorkspacePath
+
+    this.ideWorkspacePath = undefined
+    this.ideWorkspaceProjectRoot = undefined
+    this.ideSandboxState = undefined
+    this.ideTerminalState = {
+      ...this.ideTerminalState,
+      cwd: this.projectState.path,
+      workspacePath: undefined,
+      modifiedPaths: []
+    }
+    this.emitIdeTerminalState()
+
+    if (!(workspacePath && await pathExists(workspacePath))) {
+      return
+    }
+
+    try {
+      await fs.rm(workspacePath, { recursive: true, force: true })
+    } catch {
+      // Ignore best-effort cleanup failures while switching projects or shutting down.
+    }
+  }
+
+  private async spawnIdeTerminal(workspacePath: string, modifiedPaths: string[]): Promise<IdeTerminalState> {
+    let resolveClosed: () => void = () => undefined
+    const closePromise = new Promise<void>((resolve) => {
+      resolveClosed = resolve
+    })
+
+    const terminal = nodePty.spawn('powershell.exe', ['-NoLogo'], {
+      cols: 120,
+      rows: 28,
+      cwd: workspacePath,
+      name: 'xterm-256color',
+      useConpty: true,
+      env: {
+        ...process.env,
+        FORCE_COLOR: '1',
+        SENTINEL_IDE_TERMINAL: '1',
+        SENTINEL_PROJECT_ROOT: this.projectState.path || '',
+        SENTINEL_WORKSPACE_PATH: workspacePath,
+        SENTINEL_WORKSPACE_MODE: 'sandbox-copy'
+      }
+    })
+
+    const record: IdeTerminalRecord = {
+      state: {
+        status: 'starting',
+        shell: 'powershell.exe',
+        cwd: workspacePath,
+        workspacePath,
+        pid: terminal.pid,
+        createdAt: Date.now(),
+        modifiedPaths
+      },
+      terminal,
+      closePromise,
+      resolveClosed,
+      closeRequested: false
+    }
+
+    this.ideTerminalRecord = record
+    this.ideTerminalState = { ...record.state }
+    this.emitIdeTerminalState()
+
+    terminal.onData((data) => {
+      if (record.state.status === 'starting') {
+        record.state.status = 'ready'
+        this.ideTerminalState = { ...record.state }
+        this.emitIdeTerminalState()
+      }
+
+      this.emit('ide-terminal-output', { data })
+    })
+
+    terminal.onExit(({ exitCode }) => {
+      void this.finalizeIdeTerminal(record, exitCode)
+    })
+
+    return structuredClone(record.state)
+  }
+
+  private async finalizeIdeTerminal(
+    record: IdeTerminalRecord,
+    exitCode: number | null,
+    options?: { error?: string }
+  ): Promise<void> {
+    if (record.finalizePromise) {
+      await record.finalizePromise
+      return
+    }
+
+    record.finalizePromise = (async () => {
+      await this.terminateProcessId(record.state.pid)
+
+      const closedCleanly = exitCode === 0 || exitCode === null
+      record.state.exitCode = exitCode
+      record.state.status = record.closeRequested || closedCleanly ? 'closed' : 'error'
+
+      if (options?.error) {
+        record.state.error = options.error
+      } else if (!record.closeRequested && !closedCleanly) {
+        record.state.error = `PowerShell exited unexpectedly with code ${exitCode}.`
+      } else {
+        record.state.error = undefined
+      }
+
+      this.ideTerminalState = { ...record.state }
+      if (this.ideTerminalRecord === record) {
+        this.ideTerminalRecord = null
+      }
+
+      this.emitIdeTerminalState()
+      record.resolveClosed()
+    })()
+
+    await record.finalizePromise
+  }
+
+  private async terminateProcessId(pid?: number): Promise<void> {
+    if (!pid) {
+      return
+    }
+
+    try {
+      await runCommand('taskkill', ['/PID', String(pid), '/T', '/F'])
+    } catch {
+      // taskkill returns non-zero when the process has already exited.
+    }
+  }
+
   private async terminateSessionProcesses(record: SessionRecord): Promise<void> {
     const rootPid = record.summary.pid
     const otherPids = this.getTrackedPids(record.summary.id).filter((pid) => pid !== rootPid)
@@ -937,11 +1407,7 @@ export class SessionManager extends EventEmitter {
     }
 
     if (rootPid) {
-      try {
-        await runCommand('taskkill', ['/PID', String(rootPid), '/T', '/F'])
-      } catch {
-        // taskkill returns non-zero when the root process has already exited.
-      }
+      await this.terminateProcessId(rootPid)
     }
 
     if (otherPids.length === 0) {
@@ -991,6 +1457,7 @@ export class SessionManager extends EventEmitter {
     )
 
     if (activeRecords.length === 0) {
+      await this.refreshIdeWorkspaceDiffs()
       this.emitWorkspaceState()
       return
     }
@@ -1057,6 +1524,7 @@ export class SessionManager extends EventEmitter {
       }
     }
 
+    await this.refreshIdeWorkspaceDiffs()
     this.emitWorkspaceState()
   }
 

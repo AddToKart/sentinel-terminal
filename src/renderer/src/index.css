@@ -85,12 +85,36 @@ textarea {
 .xterm {
   height: 100%;
   max-height: 100%;
-  padding: 0.75rem 0.9rem;
+  cursor: default !important;
+  padding: 0;
 }
 
 .xterm .xterm-viewport {
   background: transparent !important;
-  overflow-y: auto !important;
+  overflow-y: scroll !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  cursor: default !important;
+}
+
+.xterm .xterm-screen {
+  cursor: default !important;
+}
+
+.xterm .xterm-helpers,
+.xterm .xterm-helper-textarea,
+.xterm .composition-view {
+  pointer-events: none !important;
+}
+
+.xterm .xterm-helper-textarea {
+  position: fixed !important;
+  left: -99999px !important;
+  top: 0 !important;
+  width: 1px !important;
+  height: 1px !important;
+  opacity: 0 !important;
+  z-index: -1 !important;
 }
 
 .xterm .xterm-screen canvas {
@@ -102,6 +126,11 @@ textarea {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+.terminal-host {
+  position: relative;
+  cursor: default;
 }
 
 .dashboard-handle {

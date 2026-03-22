@@ -2,6 +2,8 @@ import type { IPty } from 'node-pty'
 
 import type {
   ActivityLogEntry,
+  IdeTerminalOutputEvent,
+  IdeTerminalState,
   SessionCommandEntry,
   SessionDiffUpdate,
   SessionHistoryUpdate,
@@ -44,6 +46,16 @@ export interface SessionRecord {
   finalizePromise?: Promise<void>
 }
 
+export interface IdeTerminalRecord {
+  state: IdeTerminalState
+  terminal: IPty
+  closePromise: Promise<void>
+  resolveClosed: () => void
+  closeRequested: boolean
+  sandboxState?: SandboxWorkspaceState
+  finalizePromise?: Promise<void>
+}
+
 export interface FileFingerprint {
   signature: string
   hash: string
@@ -58,6 +70,8 @@ export interface SandboxWorkspaceState {
 export type ManagerEvents = {
   'session-output': [{ sessionId: string; data: string }]
   'session-state': [SessionSummary]
+  'ide-terminal-output': [IdeTerminalOutputEvent]
+  'ide-terminal-state': [IdeTerminalState]
   'session-metrics': [SessionMetricsUpdate]
   'session-history': [SessionHistoryUpdate]
   'session-diff': [SessionDiffUpdate]

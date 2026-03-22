@@ -4,7 +4,7 @@ import path from 'node:path'
 
 import type { SessionApplyResult, SessionSyncConflict } from '@shared/types'
 
-import { pathExists } from './commands'
+import { pathExists, runCommand } from './commands'
 import { IGNORED_DIRECTORIES, SANDBOX_LINK_DIRECTORIES } from './constants'
 import { normalizeRelativePath } from './helpers'
 import type { FileFingerprint, SandboxWorkspaceState } from './types'
@@ -35,6 +35,49 @@ function resolveWorkspaceTarget(rootPath: string, relativePath: string): string 
 async function hashFile(filePath: string): Promise<string> {
   const content = await fs.readFile(filePath)
   return createHash('sha1').update(content).digest('hex')
+}
+
+async function copyProjectTree(
+  projectRoot: string,
+  workspacePath: string,
+  relativeRoot = ''
+): Promise<void> {
+  const sourceRoot = relativeRoot ? path.join(projectRoot, relativeRoot) : projectRoot
+  const targetRoot = relativeRoot ? path.join(workspacePath, relativeRoot) : workspacePath
+
+  await fs.mkdir(targetRoot, { recursive: true })
+
+  const entries = await fs.readdir(sourceRoot, { withFileTypes: true })
+  for (const entry of entries) {
+    const nextRelativePath = relativeRoot ? path.join(relativeRoot, entry.name) : entry.name
+    const sourcePath = path.join(projectRoot, nextRelativePath)
+    const targetPath = path.join(workspacePath, nextRelativePath)
+
+    if (entry.isDirectory()) {
+      if (shouldSkipDirectory(entry.name)) {
+        continue
+      }
+
+      await copyProjectTree(projectRoot, workspacePath, nextRelativePath)
+      continue
+    }
+
+    if (entry.isSymbolicLink()) {
+      try {
+        const linkTarget = await fs.readlink(sourcePath)
+        const linkStats = await fs.stat(sourcePath)
+        await fs.symlink(linkTarget, targetPath, linkStats.isDirectory() ? 'junction' : 'file')
+      } catch {
+        // Skip unsupported symlinks inside sandbox copies rather than failing the entire workspace.
+      }
+      continue
+    }
+
+    if (entry.isFile()) {
+      await fs.mkdir(path.dirname(targetPath), { recursive: true })
+      await fs.copyFile(sourcePath, targetPath)
+    }
+  }
 }
 
 async function listTrackedFiles(rootPath: string, relativeRoot = ''): Promise<string[]> {
@@ -98,17 +141,39 @@ async function snapshotWorkspaceFiles(
   return new Map(snapshots)
 }
 
-async function copyTrackedFiles(
-  projectRoot: string,
-  workspacePath: string,
-  relativePaths: Iterable<string>
-): Promise<void> {
-  for (const relativePath of relativePaths) {
-    const sourcePath = resolveWorkspaceTarget(projectRoot, relativePath)
-    const destinationPath = resolveWorkspaceTarget(workspacePath, relativePath)
+async function writeSandboxGitExclude(workspacePath: string): Promise<void> {
+  const excludeFilePath = path.join(workspacePath, '.git', 'info', 'exclude')
+  const ignoreEntries = new Set<string>([
+    ...IGNORED_DIRECTORIES,
+    ...SANDBOX_LINK_DIRECTORIES
+  ])
 
-    await fs.mkdir(path.dirname(destinationPath), { recursive: true })
-    await fs.copyFile(sourcePath, destinationPath)
+  const content = [...ignoreEntries]
+    .filter(Boolean)
+    .map((entry) => `${entry.replace(/\\/g, '/')}/`)
+    .join('\n')
+
+  await fs.mkdir(path.dirname(excludeFilePath), { recursive: true })
+  await fs.writeFile(excludeFilePath, content ? `${content}\n` : '', 'utf-8')
+}
+
+async function initializeSandboxRepository(workspacePath: string): Promise<void> {
+  try {
+    await runCommand('git', ['init', '-b', 'sentinel-sandbox'], workspacePath)
+  } catch {
+    await runCommand('git', ['init'], workspacePath)
+    await runCommand('git', ['checkout', '-B', 'sentinel-sandbox'], workspacePath)
+  }
+
+  await writeSandboxGitExclude(workspacePath)
+  await runCommand('git', ['config', 'user.name', 'Sentinel'], workspacePath)
+  await runCommand('git', ['config', 'user.email', 'sentinel@local.invalid'], workspacePath)
+  await runCommand('git', ['add', '-A'], workspacePath)
+
+  try {
+    await runCommand('git', ['commit', '-m', 'Sentinel sandbox baseline'], workspacePath)
+  } catch {
+    await runCommand('git', ['commit', '--allow-empty', '-m', 'Sentinel sandbox baseline'], workspacePath)
   }
 }
 
@@ -152,8 +217,14 @@ export async function createSandboxWorkspace(
   workspacePath: string
 ): Promise<SandboxWorkspaceState> {
   const baselineHashes = await snapshotProjectHashes(projectRoot)
+  await fs.rm(workspacePath, { recursive: true, force: true })
   await fs.mkdir(workspacePath, { recursive: true })
-  await copyTrackedFiles(projectRoot, workspacePath, baselineHashes.keys())
+  await copyProjectTree(projectRoot, workspacePath)
+  try {
+    await initializeSandboxRepository(workspacePath)
+  } catch {
+    // Continue without sandbox git metadata when Git is unavailable.
+  }
   const sharedDirectories = await ensureSharedDirectories(projectRoot, workspacePath)
   const scanCache = await snapshotWorkspaceFiles(workspacePath)
 
@@ -246,20 +317,7 @@ export async function discardSandboxWorkspace(
   projectRoot: string,
   workspacePath: string
 ): Promise<SandboxWorkspaceState> {
-  const nextState = await createSandboxWorkspace(projectRoot, workspacePath)
-  const projectFiles = new Set(nextState.baselineHashes.keys())
-  const workspaceFiles = await listTrackedFiles(workspacePath)
-
-  await Promise.all(
-    workspaceFiles
-      .filter((relativePath) => !projectFiles.has(relativePath))
-      .map((relativePath) => fs.rm(resolveWorkspaceTarget(workspacePath, relativePath), { force: true }))
-  )
-
-  return {
-    ...nextState,
-    scanCache: await snapshotWorkspaceFiles(workspacePath, nextState.scanCache)
-  }
+  return createSandboxWorkspace(projectRoot, workspacePath)
 }
 
 export async function writeSandboxFile(

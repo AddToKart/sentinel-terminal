@@ -77,6 +77,7 @@ export function SessionTile({
   const writeFrameRef = useRef<number | null>(null)
   const writeInFlightRef = useRef(false)
   const fitFrameRef = useRef<number | null>(null)
+  const focusFrameRef = useRef<number | null>(null)
   const lastGeometryRef = useRef({ width: 0, height: 0, cols: 0, rows: 0 })
 
   const [viewMode, setViewMode] = useState<'terminal' | 'history' | 'review'>('terminal')
@@ -152,6 +153,7 @@ export function SessionTile({
       }
 
       fitAddon.fit()
+      terminal.refresh(0, Math.max(terminal.rows - 1, 0))
 
       const cols = terminal.cols
       const rows = terminal.rows
@@ -172,6 +174,52 @@ export function SessionTile({
       lastGeometryRef.current = { width, height, cols, rows }
       void window.sentinel.resizeSession(session.id, cols, rows)
     })
+  }
+
+  function scheduleTerminalFocus(): void {
+    if (focusFrameRef.current !== null) {
+      return
+    }
+
+    focusFrameRef.current = requestAnimationFrame(() => {
+      focusFrameRef.current = null
+      if (viewModeRef.current !== 'terminal') {
+        return
+      }
+
+      terminalRef.current?.focus()
+    })
+  }
+
+  function configureTerminalDom(terminal: Terminal): void {
+    const textarea = terminal.textarea
+    if (!textarea) {
+      return
+    }
+
+    textarea.spellcheck = false
+    textarea.autocapitalize = 'off'
+    textarea.autocomplete = 'off'
+    textarea.autocorrect = false
+    textarea.setAttribute('aria-hidden', 'true')
+    textarea.style.pointerEvents = 'none'
+    textarea.style.position = 'fixed'
+    textarea.style.left = '-99999px'
+    textarea.style.top = '0'
+    textarea.style.width = '1px'
+    textarea.style.height = '1px'
+    textarea.style.opacity = '0'
+  }
+
+  function handleWheel(event: React.WheelEvent<HTMLDivElement>): void {
+    const terminal = terminalRef.current
+    if (!terminal || event.deltaY === 0) {
+      return
+    }
+
+    event.preventDefault()
+    const lines = Math.sign(event.deltaY) * Math.max(1, Math.ceil(Math.abs(event.deltaY) / 48))
+    terminal.scrollLines(lines)
   }
 
   // Terminal initialization
@@ -195,6 +243,7 @@ export function SessionTile({
     const fitAddon = new FitAddon()
     terminal.loadAddon(fitAddon)
     terminal.open(terminalHostRef.current)
+    configureTerminalDom(terminal)
     terminal.writeln(`\x1b[38;2;140;245;221m${session.label.toUpperCase()}\x1b[0m`)
     terminal.writeln(`\x1b[38;2;143;165;184mWorkspace:\x1b[0m ${session.workspaceStrategy}`)
     if (session.branchName) {
@@ -218,6 +267,7 @@ export function SessionTile({
 
     requestAnimationFrame(() => {
       scheduleTerminalFit()
+      scheduleTerminalFocus()
     })
 
     terminalRef.current = terminal
@@ -235,6 +285,10 @@ export function SessionTile({
         cancelAnimationFrame(fitFrameRef.current)
         fitFrameRef.current = null
       }
+      if (focusFrameRef.current !== null) {
+        cancelAnimationFrame(focusFrameRef.current)
+        focusFrameRef.current = null
+      }
       writeQueueRef.current = []
       writeInFlightRef.current = false
       lastGeometryRef.current = { width: 0, height: 0, cols: 0, rows: 0 }
@@ -249,6 +303,7 @@ export function SessionTile({
     if (viewMode !== 'terminal' || !terminalRef.current || !fitAddonRef.current) return
     requestAnimationFrame(() => {
       scheduleTerminalFit()
+      scheduleTerminalFocus()
     })
   }, [session.id, fitNonce, viewMode])
 
@@ -334,7 +389,7 @@ export function SessionTile({
   return (
     <article
       className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[#060a0f] rounded-none border border-white/10"
-      onMouseDown={() => { if (viewMode === 'terminal') terminalRef.current?.focus() }}
+      onMouseDown={() => { if (viewMode === 'terminal') scheduleTerminalFocus() }}
     >
       {/* ── Permanent utility strip (20px) ─────────────────────── */}
       <div className="shrink-0 flex items-center justify-between border-b border-white/10 bg-black/40 px-2 h-[20px]">
@@ -373,7 +428,7 @@ export function SessionTile({
       <div className="relative flex-1 min-h-0 overflow-hidden">
         {/* Terminal */}
         <div className={`absolute inset-0 ${viewMode === 'terminal' ? 'z-10' : 'z-0 pointer-events-none'}`}>
-          <div className="terminal-host h-full w-full overflow-hidden" ref={terminalHostRef} />
+          <div className="terminal-host h-full w-full overflow-hidden" onMouseDown={() => scheduleTerminalFocus()} onWheel={handleWheel} ref={terminalHostRef} />
         </div>
 
         {/* Review / Diff */}

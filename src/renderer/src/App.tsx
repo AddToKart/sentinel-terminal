@@ -6,13 +6,14 @@ import { AgentDashboard } from './components/AgentDashboard'
 import { CodePreview } from './components/CodePreview'
 import { ConsoleDrawer } from './components/ConsoleDrawer'
 import { GlobalActionBar } from './components/GlobalActionBar'
-import { SessionTile } from './components/SessionTile'
+import { IdeTerminalPanel } from './components/IdeTerminalPanel'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
-import { clearSessionOutput } from './terminal-stream'
+import { clearIdeTerminalOutput, clearSessionOutput } from './terminal-stream'
 
 import type {
   ActivityLogEntry,
+  IdeTerminalState,
   ProjectState,
   SessionCommandEntry,
   SessionSummary,
@@ -37,6 +38,12 @@ const defaultSummary = (): WorkspaceSummary => ({
   defaultSessionStrategy: 'sandbox-copy'
 })
 
+const defaultIdeTerminalState = (): IdeTerminalState => ({
+  status: 'idle',
+  shell: 'powershell.exe',
+  modifiedPaths: []
+})
+
 export default function App(): JSX.Element {
   const [project, setProject] = useState<ProjectState>(emptyProject())
   const [sessions, setSessions] = useState<SessionSummary[]>([])
@@ -55,6 +62,7 @@ export default function App(): JSX.Element {
   const [globalMode, setGlobalMode] = useState<'multiplex' | 'ide'>('multiplex')
   const [refreshingProject, setRefreshingProject] = useState(false)
   const [defaultSessionStrategy, setDefaultSessionStrategy] = useState<SessionWorkspaceStrategy>('sandbox-copy')
+  const [ideTerminalState, setIdeTerminalState] = useState<IdeTerminalState>(defaultIdeTerminalState())
 
   const sidebarPanelRef = useRef<ImperativePanelHandle | null>(null)
   const shellViewportRef = useRef<HTMLDivElement | null>(null)
@@ -103,7 +111,8 @@ export default function App(): JSX.Element {
           if (i >= 0) { const n = [...cur]; n[i] = { ...n[i], metrics: u.metrics, pid: u.pid ?? n[i].pid }; return n }
           return cur
         })
-      })
+      }),
+      window.sentinel.onIdeTerminalState(setIdeTerminalState)
     ]
 
     async function init() {
@@ -115,6 +124,7 @@ export default function App(): JSX.Element {
         setWorkspaceSummary(payload.summary)
         setActivityLog(payload.activityLog)
         setDefaultSessionStrategy(payload.preferences.defaultSessionStrategy)
+        setIdeTerminalState(payload.ideTerminal)
 
         const histories: Record<string, SessionCommandEntry[]> = {}
         for (const u of payload.histories) histories[u.sessionId] = u.entries
@@ -177,7 +187,15 @@ export default function App(): JSX.Element {
   }
 
   async function handleOpenProject() {
-    try { const p = await window.sentinel.selectProject(); setProject(p); setSelectedFilePath(null) }
+    try {
+      const previousProjectPath = project.path
+      const nextProject = await window.sentinel.selectProject()
+      if (nextProject.path !== previousProjectPath) {
+        clearIdeTerminalOutput()
+      }
+      setProject(nextProject)
+      setSelectedFilePath(null)
+    }
     catch (e: any) { if (e.message !== 'Dialog cancelled') setErrorMessage(`Failed to open project: ${e.message}`) }
   }
 
@@ -238,16 +256,13 @@ export default function App(): JSX.Element {
 
   const hasProject = Boolean(project.path)
   const diffBadges = Object.fromEntries(
-    Object.values(sessionDiffs)
+    [...Object.values(sessionDiffs).flat(), ...ideTerminalState.modifiedPaths]
       .flat()
       .map((relativePath) => [
         project.path ? `${project.path.replace(/[\/\\]$/, '')}\\${relativePath.replace(/\//g, '\\')}` : relativePath,
         ['modified']
       ])
   )
-
-  // The active IDE session (for the bottom tray)
-  const ideSession = sessions.find((s) => s.id === maximizedSessionId) ?? sessions[0] ?? null
 
   const multiplexContent = !hasProject ? (
     <div className="flex h-full items-center justify-center">
@@ -290,30 +305,13 @@ export default function App(): JSX.Element {
         <CodePreview
           filePath={selectedFilePath}
           projectPath={project.path}
-          sessions={sessions}
+          ideTerminalState={ideTerminalState}
           onClose={() => setSelectedFilePath(null)}
         />
       </Panel>
       <PanelResizeHandle className="h-[3px] bg-transparent hover:bg-sentinel-accent/20 active:bg-sentinel-accent/40 transition-colors cursor-row-resize" />
       <Panel defaultSize={35} minSize={10} className="min-h-0">
-        {ideSession ? (
-          <SessionTile
-            session={ideSession}
-            historyEntries={sessionHistories[ideSession.id] ?? []}
-            modifiedPaths={sessionDiffs[ideSession.id] ?? []}
-            isMaximized={false}
-            onClose={handleCloseSession}
-            onToggleMaximize={(id) => setMaximizedSessionId((c) => c === id ? null : id)}
-            applySession={() => window.sentinel.applySession(ideSession.id)}
-            commitSession={(msg) => window.sentinel.commitSession(ideSession.id, msg)}
-            discardSessionChanges={() => window.sentinel.discardSessionChanges(ideSession.id)}
-            fitNonce={fitNonce}
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center text-sm text-sentinel-mist bg-[#060a0f] border-t border-white/10">
-            No active agents
-          </div>
-        )}
+        <IdeTerminalPanel fitNonce={fitNonce} projectPath={project.path} terminalState={ideTerminalState} />
       </Panel>
     </PanelGroup>
   )

@@ -74,6 +74,18 @@ function registerIpcHandlers(): void {
   ipcMain.handle('sentinel:send-input', (_event, payload: { sessionId: string; data: string }) =>
     sessionManager.sendInput(payload.sessionId, payload.data)
   )
+  ipcMain.handle('sentinel:ensure-ide-terminal', () => sessionManager.ensureIdeTerminal())
+  ipcMain.handle('sentinel:resize-ide-terminal', (_event, payload: { cols: number; rows: number }) =>
+    sessionManager.resizeIdeTerminal(payload.cols, payload.rows)
+  )
+  ipcMain.handle('sentinel:send-ide-terminal-input', (_event, payload: { data: string }) =>
+    sessionManager.sendIdeTerminalInput(payload.data)
+  )
+  ipcMain.handle('sentinel:write-ide-file', (_event, payload: { relativePath: string; content: string }) =>
+    sessionManager.writeIdeFile(payload.relativePath, payload.content)
+  )
+  ipcMain.handle('sentinel:apply-ide-workspace', () => sessionManager.applyIdeWorkspace())
+  ipcMain.handle('sentinel:discard-ide-workspace-changes', () => sessionManager.discardIdeWorkspaceChanges())
   ipcMain.handle('sentinel:read-file', (_event, filePath: string) => sessionManager.readFile(filePath))
   ipcMain.handle('sentinel:read-file-diff', (_event, payload: { sessionId: string; filePath: string }) =>
     sessionManager.readFileDiff(payload.sessionId, payload.filePath)
@@ -106,6 +118,14 @@ app.whenReady().then(() => {
 
   sessionManager.on('session-state', (session) => {
     sendToRenderer('sentinel:session-state', session)
+  })
+
+  sessionManager.on('ide-terminal-output', (payload) => {
+    sendToRenderer('sentinel:ide-terminal-output', payload)
+  })
+
+  sessionManager.on('ide-terminal-state', (state) => {
+    sendToRenderer('sentinel:ide-terminal-state', state)
   })
 
   sessionManager.on('session-metrics', (payload) => {

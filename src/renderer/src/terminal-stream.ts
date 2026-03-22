@@ -1,64 +1,121 @@
-import type { SessionOutputEvent } from '@shared/types'
+import type { IdeTerminalOutputEvent, SessionOutputEvent } from '@shared/types'
 
 type OutputListener = (data: string) => void
 
-interface SessionOutputBuffer {
+interface OutputBuffer {
   chunks: string[]
   totalLength: number
 }
 
-const MAX_BUFFER_LENGTH = 250_000
-
-const buffers = new Map<string, SessionOutputBuffer>()
-const listeners = new Map<string, Set<OutputListener>>()
-
-let bridgeStarted = false
-
-function getBuffer(sessionId: string): SessionOutputBuffer {
-  let buffer = buffers.get(sessionId)
-  if (!buffer) {
-    buffer = { chunks: [], totalLength: 0 }
-    buffers.set(sessionId, buffer)
-  }
-
-  return buffer
+interface OutputStore {
+  clear: (key: string) => void
+  push: (key: string, data: string) => void
+  subscribe: (key: string, listener: OutputListener, replay?: boolean) => () => void
 }
 
-function trimBuffer(buffer: SessionOutputBuffer): void {
-  while (buffer.totalLength > MAX_BUFFER_LENGTH && buffer.chunks.length > 1) {
-    const removed = buffer.chunks.shift()
-    if (!removed) {
-      break
+const MAX_BUFFER_LENGTH = 250_000
+const IDE_TERMINAL_KEY = 'ide-terminal'
+
+function createOutputStore(): OutputStore {
+  const buffers = new Map<string, OutputBuffer>()
+  const listeners = new Map<string, Set<OutputListener>>()
+
+  function getBuffer(key: string): OutputBuffer {
+    let buffer = buffers.get(key)
+    if (!buffer) {
+      buffer = { chunks: [], totalLength: 0 }
+      buffers.set(key, buffer)
     }
 
-    buffer.totalLength -= removed.length
+    return buffer
+  }
+
+  function trimBuffer(buffer: OutputBuffer): void {
+    while (buffer.totalLength > MAX_BUFFER_LENGTH && buffer.chunks.length > 1) {
+      const removed = buffer.chunks.shift()
+      if (!removed) {
+        break
+      }
+
+      buffer.totalLength -= removed.length
+    }
+  }
+
+  return {
+    clear(key: string) {
+      buffers.delete(key)
+      listeners.delete(key)
+    },
+    push(key: string, data: string) {
+      const buffer = getBuffer(key)
+      buffer.chunks.push(data)
+      buffer.totalLength += data.length
+      trimBuffer(buffer)
+
+      const scopedListeners = listeners.get(key)
+      if (!scopedListeners || scopedListeners.size === 0) {
+        return
+      }
+
+      for (const listener of scopedListeners) {
+        listener(data)
+      }
+    },
+    subscribe(key: string, listener: OutputListener, replay = true) {
+      let scopedListeners = listeners.get(key)
+      if (!scopedListeners) {
+        scopedListeners = new Set()
+        listeners.set(key, scopedListeners)
+      }
+
+      scopedListeners.add(listener)
+
+      if (replay) {
+        const replayData = buffers.get(key)?.chunks.join('')
+        if (replayData) {
+          listener(replayData)
+        }
+      }
+
+      return () => {
+        const currentListeners = listeners.get(key)
+        if (!currentListeners) {
+          return
+        }
+
+        currentListeners.delete(listener)
+        if (currentListeners.size === 0) {
+          listeners.delete(key)
+        }
+      }
+    }
   }
 }
 
-function dispatchOutput(event: SessionOutputEvent): void {
-  const buffer = getBuffer(event.sessionId)
-  buffer.chunks.push(event.data)
-  buffer.totalLength += event.data.length
-  trimBuffer(buffer)
+const store = createOutputStore()
 
-  const sessionListeners = listeners.get(event.sessionId)
-  if (!sessionListeners || sessionListeners.size === 0) {
+let sessionBridgeStarted = false
+let ideBridgeStarted = false
+
+function ensureSessionBridge(): void {
+  if (sessionBridgeStarted) {
     return
   }
 
-  for (const listener of sessionListeners) {
-    listener(event.data)
-  }
+  sessionBridgeStarted = true
+  window.sentinel.onSessionOutput((event: SessionOutputEvent) => {
+    store.push(event.sessionId, event.data)
+  })
 }
 
-function ensureBridge(): void {
-  if (bridgeStarted) {
+function ensureIdeBridge(): void {
+  if (ideBridgeStarted) {
     return
   }
 
-  bridgeStarted = true
-  window.sentinel.onSessionOutput((event) => {
-    dispatchOutput(event)
+  ideBridgeStarted = true
+  window.sentinel.onIdeTerminalOutput((event: IdeTerminalOutputEvent) => {
+    store.push(IDE_TERMINAL_KEY, event.data)
   })
 }
 
@@ -67,38 +124,22 @@ export function subscribeToSessionOutput(
   listener: OutputListener,
   options: { replay?: boolean } = {}
 ): () => void {
-  ensureBridge()
-
-  const replay = options.replay ?? true
-  let sessionListeners = listeners.get(sessionId)
-  if (!sessionListeners) {
-    sessionListeners = new Set()
-    listeners.set(sessionId, sessionListeners)
-  }
-
-  sessionListeners.add(listener)
-
-  if (replay) {
-    const replayData = buffers.get(sessionId)?.chunks.join('')
-    if (replayData) {
-      listener(replayData)
-    }
-  }
-
-  return () => {
-    const currentListeners = listeners.get(sessionId)
-    if (!currentListeners) {
-      return
-    }
-
-    currentListeners.delete(listener)
-    if (currentListeners.size === 0) {
-      listeners.delete(sessionId)
-    }
-  }
+  ensureSessionBridge()
+  return store.subscribe(sessionId, listener, options.replay ?? true)
 }
 
 export function clearSessionOutput(sessionId: string): void {
-  buffers.delete(sessionId)
-  listeners.delete(sessionId)
+  store.clear(sessionId)
+}
+
+export function subscribeToIdeTerminalOutput(
+  listener: OutputListener,
+  options: { replay?: boolean } = {}
+): () => void {
+  ensureIdeBridge()
+  return store.subscribe(IDE_TERMINAL_KEY, listener, options.replay ?? true)
+}
+
+export function clearIdeTerminalOutput(): void {
+  store.clear(IDE_TERMINAL_KEY)
 }

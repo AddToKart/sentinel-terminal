@@ -4,6 +4,8 @@ import type {
   ActivityLogEntry,
   BootstrapPayload,
   CreateSessionInput,
+  IdeTerminalOutputEvent,
+  IdeTerminalState,
   ProjectState,
   SessionDiffUpdate,
   SessionHistoryUpdate,
@@ -36,6 +38,18 @@ const api: SentinelApi = {
     ipcRenderer.invoke('sentinel:resize-session', { sessionId, cols, rows }) as Promise<void>,
   sendInput: (sessionId: string, data: string) =>
     ipcRenderer.invoke('sentinel:send-input', { sessionId, data }) as Promise<void>,
+  ensureIdeTerminal: () =>
+    ipcRenderer.invoke('sentinel:ensure-ide-terminal') as Promise<IdeTerminalState>,
+  resizeIdeTerminal: (cols: number, rows: number) =>
+    ipcRenderer.invoke('sentinel:resize-ide-terminal', { cols, rows }) as Promise<void>,
+  sendIdeTerminalInput: (data: string) =>
+    ipcRenderer.invoke('sentinel:send-ide-terminal-input', { data }) as Promise<void>,
+  writeIdeFile: (relativePath: string, content: string) =>
+    ipcRenderer.invoke('sentinel:write-ide-file', { relativePath, content }) as Promise<void>,
+  applyIdeWorkspace: () =>
+    ipcRenderer.invoke('sentinel:apply-ide-workspace'),
+  discardIdeWorkspaceChanges: () =>
+    ipcRenderer.invoke('sentinel:discard-ide-workspace-changes') as Promise<void>,
   readFile: (filePath: string) =>
     ipcRenderer.invoke('sentinel:read-file', filePath) as Promise<string>,
   readFileDiff: (sessionId: string, filePath: string) =>
@@ -54,8 +68,12 @@ const api: SentinelApi = {
     ipcRenderer.invoke('sentinel:open-in-system-editor', filePath) as Promise<void>,
   onSessionOutput: (listener: (event: SessionOutputEvent) => void) =>
     subscribe<SessionOutputEvent>('sentinel:session-output', listener),
+  onIdeTerminalOutput: (listener: (event: IdeTerminalOutputEvent) => void) =>
+    subscribe<IdeTerminalOutputEvent>('sentinel:ide-terminal-output', listener),
   onSessionState: (listener: (session: SessionSummary) => void) =>
     subscribe<SessionSummary>('sentinel:session-state', listener),
+  onIdeTerminalState: (listener: (state: IdeTerminalState) => void) =>
+    subscribe<IdeTerminalState>('sentinel:ide-terminal-state', listener),
   onSessionMetrics: (listener: (payload: SessionMetricsUpdate) => void) =>
     subscribe<SessionMetricsUpdate>('sentinel:session-metrics', listener),
   onSessionHistory: (listener: (payload: SessionHistoryUpdate) => void) =>

@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Code2, Diff, FileCode2, Save, X } from 'lucide-react'
-import type { SessionSummary } from '@shared/types'
+import type { IdeTerminalState } from '@shared/types'
 
 interface CodePreviewProps {
   filePath: string | null
   projectPath: string | undefined
-  sessions: SessionSummary[]
+  ideTerminalState: IdeTerminalState
   onClose: () => void
 }
 
@@ -26,12 +26,6 @@ function getLanguage(fileName: string): string {
   return 'plaintext'
 }
 
-function joinPath(base: string, relative: string): string {
-  // Normalize separators for Windows
-  const normalized = relative.replace(/\//g, '\\').replace(/^\\/,'')
-  return `${base.replace(/[\/\\]$/, '')}\\${normalized}`
-}
-
 function relativeProjectPath(filePath: string, projectPath: string): string {
   const normalizedFile = filePath.replace(/\//g, '\\')
   const normalizedProject = projectPath.replace(/[\/\\]$/, '').replace(/\//g, '\\')
@@ -40,49 +34,42 @@ function relativeProjectPath(filePath: string, projectPath: string): string {
     : normalizedFile.split('\\').pop() ?? ''
 }
 
-export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePreviewProps): JSX.Element {
+function joinWorkspacePath(workspacePath: string, relativePath: string): string {
+  const normalizedRelativePath = relativePath.replace(/\//g, '\\').replace(/^\\+/, '')
+  return `${workspacePath.replace(/[\/\\]$/, '')}\\${normalizedRelativePath}`
+}
+
+export function CodePreview({ filePath, projectPath, ideTerminalState, onClose }: CodePreviewProps): JSX.Element {
   const [activeTab, setActiveTab] = useState<ViewTab>('edit')
   const [editContent, setEditContent] = useState('')
   const [originalContent, setOriginalContent] = useState('')
   const [modifiedContent, setModifiedContent] = useState('')
-  const [activeSessionId, setActiveSessionId] = useState<string>(sessions[0]?.id ?? '')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  const activeSession = sessions.find(s => s.id === activeSessionId) ?? sessions[0]
   const relativePath = filePath && projectPath ? relativeProjectPath(filePath, projectPath) : null
-
-  // Determine which workspace path to read from for the active session
-  const workspaceFilePath = useCallback((): string | null => {
-    if (!filePath || !projectPath || !activeSession) return null
-    return joinPath(activeSession.workspacePath, relativePath ?? '')
-  }, [activeSession, filePath, projectPath, relativePath])
+  const workspaceFilePath = ideTerminalState.workspacePath && relativePath
+    ? joinWorkspacePath(ideTerminalState.workspacePath, relativePath)
+    : null
 
   useEffect(() => {
-    if (!activeSessionId && sessions[0]?.id) {
-      setActiveSessionId(sessions[0].id)
-    }
-  }, [activeSessionId, sessions])
-
-  useEffect(() => {
-    if (!filePath) return
+    if (!filePath || !workspaceFilePath) return
+    const currentFilePath = filePath
+    const currentWorkspaceFilePath = workspaceFilePath
     let cancelled = false
     setLoading(true)
     setSaveError(null)
     
     async function fetchContents() {
       try {
-        // Always load the file from the active session's workspace for editing
-        const workspace = workspaceFilePath()
-        const content = await window.sentinel.readFile(workspace ?? filePath!)
+        const [original, content] = await Promise.all([
+          window.sentinel.readFile(currentFilePath),
+          window.sentinel.readFile(currentWorkspaceFilePath)
+        ])
         if (cancelled) return
         setEditContent(content)
-
-        // For diff, also load original from root project
-        const rootContent = filePath ? await window.sentinel.readFile(filePath).catch(() => '') : ''
-        if (cancelled) return
-        setOriginalContent(rootContent)
+        setOriginalContent(original)
         setModifiedContent(content)
       } catch {
         if (!cancelled) {
@@ -97,14 +84,14 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
 
     fetchContents()
     return () => { cancelled = true }
-  }, [filePath, activeSessionId, workspaceFilePath])
+  }, [filePath, workspaceFilePath])
 
   async function handleSave() {
-    if (!activeSession || !relativePath) return
+    if (!relativePath) return
     setSaving(true)
     setSaveError(null)
     try {
-      await window.sentinel.writeSessionFile(activeSession.id, relativePath, editContent)
+      await window.sentinel.writeIdeFile(relativePath, editContent)
       setModifiedContent(editContent)
     } catch (error: any) {
       setSaveError(error.message || 'Save failed')
@@ -116,14 +103,14 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (!event.ctrlKey || event.altKey || event.shiftKey || event.code !== 'KeyS') return
-      if (!filePath || !activeSession || !relativePath) return
+      if (!relativePath) return
       event.preventDefault()
       void handleSave()
     }
 
     window.addEventListener('keydown', onKeyDown, { capture: true })
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
-  }, [activeSession, editContent, filePath, relativePath])
+  }, [editContent, relativePath])
 
   if (!filePath) {
     return (
@@ -138,27 +125,20 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
 
   const fileName = filePath.split(/[\/\\]/).pop() ?? 'File'
   const language = getLanguage(fileName)
+  const workspaceReady = Boolean(workspaceFilePath)
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-[#0d1117]">
       {/* Editor Titlebar */}
       <div className="flex shrink-0 items-center justify-between border-b border-white/10 bg-[#0d1117] px-3 py-1.5 gap-3">
-        {/* Left: filename + session selector */}
+        {/* Left: filename + relative path */}
         <div className="flex items-center gap-3 min-w-0">
           <div className="flex items-center gap-2 text-xs text-sentinel-mist font-medium truncate">
             <FileCode2 className="h-3.5 w-3.5 shrink-0 text-sentinel-ice" />
             <span className="truncate">{fileName}</span>
           </div>
-          {sessions.length > 1 && (
-            <select
-              className="shrink-0 bg-black/40 border border-white/10 text-xs text-sentinel-mist px-2 py-0.5 outline-none focus:border-sentinel-accent/40"
-              value={activeSessionId}
-              onChange={(e) => setActiveSessionId(e.target.value)}
-            >
-              {sessions.map(s => (
-                <option key={s.id} value={s.id}>{s.label}</option>
-              ))}
-            </select>
+          {relativePath && (
+            <span className="truncate text-[11px] text-sentinel-mist/60">{relativePath}</span>
           )}
         </div>
 
@@ -190,17 +170,15 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
 
         {/* Right: actions */}
         <div className="flex items-center gap-2 shrink-0">
-          {activeSession && (
-            <div className="text-[10px] uppercase tracking-[0.2em] text-sentinel-mist">
-              {activeSession.workspaceStrategy === 'sandbox-copy' ? 'sandbox' : 'worktree'}
-            </div>
-          )}
+          <div className="text-[10px] uppercase tracking-[0.2em] text-sentinel-mist">
+            IDE Workspace
+          </div>
           {saveError && <span className="text-[10px] text-rose-300">{saveError}</span>}
           <button
             onClick={() => { void handleSave() }}
             className="inline-flex items-center gap-1.5 border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-sentinel-mist transition hover:border-sentinel-accent/40 hover:text-white disabled:opacity-40"
-            disabled={!activeSession || !relativePath || saving}
-            title="Save to session workspace"
+            disabled={!workspaceReady || !relativePath || saving}
+            title="Save to IDE workspace"
           >
             <Save className="h-3 w-3" />
             {saving ? 'Saving' : 'Save'}
@@ -217,9 +195,9 @@ export function CodePreview({ filePath, projectPath, sessions, onClose }: CodePr
 
       {/* Editor Area */}
       <div className="relative flex-1 min-h-0">
-        {loading && (
+        {(!workspaceReady || loading) && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#0d1117]/80 text-xs text-sentinel-mist">
-            Loading...
+            {workspaceReady ? 'Loading...' : 'Starting IDE workspace...'}
           </div>
         )}
 
