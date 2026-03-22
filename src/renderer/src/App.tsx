@@ -10,11 +10,17 @@ import { IdeTerminalPanel } from './components/IdeTerminalPanel'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
 import { clearIdeTerminalOutput, clearSessionOutput } from './terminal-stream'
+import {
+  buildWorkspaceOverlayFiles,
+  collectProjectPaths,
+  type SelectedFileEntry
+} from './workspace-overlay'
 
 import type {
   ActivityLogEntry,
   IdeTerminalState,
   ProjectState,
+  SentinelApi,
   SessionCommandEntry,
   SessionSummary,
   SessionWorkspaceStrategy,
@@ -44,6 +50,16 @@ const defaultIdeTerminalState = (): IdeTerminalState => ({
   modifiedPaths: []
 })
 
+function getSentinelBridge(): SentinelApi | null {
+  return typeof window !== 'undefined' && typeof window.sentinel !== 'undefined'
+    ? window.sentinel
+    : null
+}
+
+function missingBridgeMessage(): string {
+  return 'Sentinel IPC bridge is unavailable. Open this UI through the Electron app, not a plain browser tab.'
+}
+
 export default function App(): JSX.Element {
   const [project, setProject] = useState<ProjectState>(emptyProject())
   const [sessions, setSessions] = useState<SessionSummary[]>([])
@@ -57,9 +73,10 @@ export default function App(): JSX.Element {
   const [fitNonce, setFitNonce] = useState(0)
   const [maximizedSessionId, setMaximizedSessionId] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
+  const [selectedFile, setSelectedFile] = useState<SelectedFileEntry | null>(null)
   const [globalActionBarOpen, setGlobalActionBarOpen] = useState(false)
   const [globalMode, setGlobalMode] = useState<'multiplex' | 'ide'>('multiplex')
+  const [keepIdeMounted, setKeepIdeMounted] = useState(false)
   const [refreshingProject, setRefreshingProject] = useState(false)
   const [defaultSessionStrategy, setDefaultSessionStrategy] = useState<SessionWorkspaceStrategy>('sandbox-copy')
   const [ideTerminalState, setIdeTerminalState] = useState<IdeTerminalState>(defaultIdeTerminalState())
@@ -67,8 +84,9 @@ export default function App(): JSX.Element {
   const sidebarPanelRef = useRef<ImperativePanelHandle | null>(null)
   const shellViewportRef = useRef<HTMLDivElement | null>(null)
   const fitTimerRef = useRef<number | null>(null)
+  const bridgeAvailable = Boolean(getSentinelBridge())
 
-  function requestTerminalFit(delay = 80) {
+  function requestTerminalFit(delay = 140) {
     if (fitTimerRef.current) {
       window.clearTimeout(fitTimerRef.current)
     }
@@ -82,42 +100,50 @@ export default function App(): JSX.Element {
   // Bootstrap
   useEffect(() => {
     let disposed = false
+    const sentinel = getSentinelBridge()
+
+    if (!sentinel) {
+      setErrorMessage(missingBridgeMessage())
+      return
+    }
+
+    const sentinelBridge: SentinelApi = sentinel
 
     const unsubs = [
-      window.sentinel.onActivityLog((entry) => {
+      sentinelBridge.onActivityLog((entry) => {
         setActivityLog((cur) => {
           const i = cur.findIndex((e) => e.id === entry.id)
           if (i >= 0) { const n = [...cur]; n[i] = entry; return n }
           return [entry, ...cur].slice(0, 100)
         })
       }),
-      window.sentinel.onWorkspaceState(setWorkspaceSummary),
-      window.sentinel.onSessionState((session) => {
+      sentinelBridge.onWorkspaceState(setWorkspaceSummary),
+      sentinelBridge.onSessionState((session) => {
         setSessions((cur) => {
           const i = cur.findIndex((s) => s.id === session.id)
           if (i >= 0) { const n = [...cur]; n[i] = session; return n }
           return [...cur, session]
         })
       }),
-      window.sentinel.onSessionDiff((u) => {
+      sentinelBridge.onSessionDiff((u) => {
         setSessionDiffs((cur) => ({ ...cur, [u.sessionId]: u.modifiedPaths }))
       }),
-      window.sentinel.onSessionHistory((u) => {
+      sentinelBridge.onSessionHistory((u) => {
         setSessionHistories((cur) => ({ ...cur, [u.sessionId]: u.entries }))
       }),
-      window.sentinel.onSessionMetrics((u) => {
+      sentinelBridge.onSessionMetrics((u) => {
         setSessions((cur) => {
           const i = cur.findIndex((s) => s.id === u.sessionId)
           if (i >= 0) { const n = [...cur]; n[i] = { ...n[i], metrics: u.metrics, pid: u.pid ?? n[i].pid }; return n }
           return cur
         })
       }),
-      window.sentinel.onIdeTerminalState(setIdeTerminalState)
+      sentinelBridge.onIdeTerminalState(setIdeTerminalState)
     ]
 
     async function init() {
       try {
-        const payload = await window.sentinel.bootstrap()
+        const payload = await sentinelBridge.bootstrap()
         if (disposed) return
         setProject(payload.project)
         setSessions(payload.sessions)
@@ -164,7 +190,13 @@ export default function App(): JSX.Element {
   // Trigger a re-fit when sidebar or console changes
   useEffect(() => {
     requestTerminalFit(120)
-  }, [sidebarCollapsed, consoleOpen, globalMode, sessions.length, maximizedSessionId])
+  }, [sidebarCollapsed, consoleOpen, sessions.length, maximizedSessionId])
+
+  useEffect(() => {
+    if (globalMode === 'ide') {
+      setKeepIdeMounted(true)
+    }
+  }, [globalMode])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -187,36 +219,58 @@ export default function App(): JSX.Element {
   }
 
   async function handleOpenProject() {
+    const sentinel = getSentinelBridge()
+    if (!sentinel) {
+      setErrorMessage(missingBridgeMessage())
+      return
+    }
+
     try {
       const previousProjectPath = project.path
-      const nextProject = await window.sentinel.selectProject()
+      const nextProject = await sentinel.selectProject()
       if (nextProject.path !== previousProjectPath) {
         clearIdeTerminalOutput()
       }
       setProject(nextProject)
-      setSelectedFilePath(null)
+      setSelectedFile(null)
     }
     catch (e: any) { if (e.message !== 'Dialog cancelled') setErrorMessage(`Failed to open project: ${e.message}`) }
   }
 
   async function handleRefreshProject() {
     if (!project.path) return
+    const sentinel = getSentinelBridge()
+    if (!sentinel) {
+      setErrorMessage(missingBridgeMessage())
+      return
+    }
     setRefreshingProject(true)
-    try { setProject(await window.sentinel.refreshProject()) }
+    try { setProject(await sentinel.refreshProject()) }
     catch (e: any) { setErrorMessage(`Failed to refresh: ${e.message}`) }
     finally { setRefreshingProject(false) }
   }
 
   async function handleCreateSession() {
     if (!project.path) return
-    try { await window.sentinel.createSession({ workspaceStrategy: defaultSessionStrategy }) }
+    const sentinel = getSentinelBridge()
+    if (!sentinel) {
+      setErrorMessage(missingBridgeMessage())
+      return
+    }
+
+    try { await sentinel.createSession({ workspaceStrategy: defaultSessionStrategy }) }
     catch (e: any) { setErrorMessage(`Failed to start session: ${e.message}`) }
   }
 
   async function handleCloseSession(sessionId: string) {
     if (maximizedSessionId === sessionId) setMaximizedSessionId(null)
+    const sentinel = getSentinelBridge()
+    if (!sentinel) {
+      setErrorMessage(missingBridgeMessage())
+      return
+    }
     try {
-      await window.sentinel.closeSession(sessionId)
+      await sentinel.closeSession(sessionId)
       clearSessionOutput(sessionId)
       setSessions((cur) => cur.filter((session) => session.id !== sessionId))
       setSessionHistories((cur) => {
@@ -234,8 +288,14 @@ export default function App(): JSX.Element {
   }
 
   async function handleChangeDefaultSessionStrategy(strategy: SessionWorkspaceStrategy) {
+    const sentinel = getSentinelBridge()
+    if (!sentinel) {
+      setErrorMessage(missingBridgeMessage())
+      return
+    }
+
     try {
-      const nextPreferences = await window.sentinel.setDefaultSessionStrategy(strategy)
+      const nextPreferences = await sentinel.setDefaultSessionStrategy(strategy)
       setDefaultSessionStrategy(nextPreferences.defaultSessionStrategy)
     } catch (e: any) {
       setErrorMessage(`Failed to update workspace strategy: ${e.message}`)
@@ -255,13 +315,20 @@ export default function App(): JSX.Element {
   ]
 
   const hasProject = Boolean(project.path)
+  const overlayFiles = buildWorkspaceOverlayFiles({
+    projectPath: project.path,
+    ideTerminalState,
+    sessions,
+    sessionDiffs,
+    globalMode,
+    maximizedSessionId
+  })
+  const projectPaths = collectProjectPaths(project.tree)
   const diffBadges = Object.fromEntries(
-    [...Object.values(sessionDiffs).flat(), ...ideTerminalState.modifiedPaths]
-      .flat()
-      .map((relativePath) => [
-        project.path ? `${project.path.replace(/[\/\\]$/, '')}\\${relativePath.replace(/\//g, '\\')}` : relativePath,
-        ['modified']
-      ])
+    overlayFiles.map((file) => [
+      file.projectPath,
+      [projectPaths.has(file.projectPath) ? 'modified' : 'new']
+    ])
   )
 
   const multiplexContent = !hasProject ? (
@@ -303,10 +370,10 @@ export default function App(): JSX.Element {
     <PanelGroup direction="vertical" autoSaveId="sentinel-ide-layout">
       <Panel defaultSize={65} minSize={20} className="min-h-0">
         <CodePreview
-          filePath={selectedFilePath}
+          selectedFile={selectedFile}
           projectPath={project.path}
           ideTerminalState={ideTerminalState}
-          onClose={() => setSelectedFilePath(null)}
+          onClose={() => setSelectedFile(null)}
         />
       </Panel>
       <PanelResizeHandle className="h-[3px] bg-transparent hover:bg-sentinel-accent/20 active:bg-sentinel-accent/40 transition-colors cursor-row-resize" />
@@ -315,6 +382,23 @@ export default function App(): JSX.Element {
       </Panel>
     </PanelGroup>
   )
+
+  if (!bridgeAvailable) {
+    return (
+      <div className="flex h-[100dvh] w-screen items-center justify-center overflow-hidden bg-[#060a0f] px-6 text-white">
+        <div className="max-w-xl border border-white/10 bg-black/30 p-6">
+          <div className="text-xs font-semibold uppercase tracking-[0.28em] text-sentinel-mist">Sentinel</div>
+          <h1 className="mt-3 text-xl font-semibold text-white">Electron Bridge Unavailable</h1>
+          <p className="mt-3 text-sm leading-6 text-sentinel-mist">
+            `window.sentinel` is only injected by Electron preload. If you open the renderer in a normal browser tab, the desktop bridge does not exist.
+          </p>
+          <div className="mt-4 border border-white/10 bg-black/30 px-3 py-3 text-xs text-sentinel-mist">
+            Start Sentinel through Electron, or add a mocked web bridge for browser-only development.
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-[#060a0f] text-white select-none">
@@ -403,6 +487,7 @@ export default function App(): JSX.Element {
             <Sidebar
               collapsed={false}
               diffBadges={diffBadges}
+              overlayFiles={overlayFiles}
               defaultSessionStrategy={defaultSessionStrategy}
               onOpenProject={handleOpenProject}
               onRefreshProject={handleRefreshProject}
@@ -410,7 +495,7 @@ export default function App(): JSX.Element {
               onToggleCollapse={toggleSidebar}
               project={project}
               refreshing={refreshingProject}
-              onFileSelect={(path) => { setSelectedFilePath(path); setGlobalMode('ide') }}
+              onFileSelect={(file) => { setSelectedFile(file); setGlobalMode('ide') }}
               globalMode={globalMode}
               onToggleGlobalMode={setGlobalMode}
             />
@@ -419,8 +504,26 @@ export default function App(): JSX.Element {
           <PanelResizeHandle className="relative w-[3px] bg-transparent hover:bg-sentinel-accent/20 active:bg-sentinel-accent/40 transition-colors" />
 
           <Panel className="flex flex-col min-h-0 min-w-0" defaultSize={82}>
-            <div className="flex-1 min-h-0 overflow-hidden">
-              {globalMode === 'multiplex' ? multiplexContent : ideContent}
+            <div className="relative flex-1 min-h-0 overflow-hidden">
+              <div
+                aria-hidden={globalMode !== 'multiplex'}
+                className={`absolute inset-0 min-h-0 overflow-hidden transition-opacity duration-150 ${
+                  globalMode === 'multiplex' ? 'opacity-100' : 'pointer-events-none opacity-0'
+                }`}
+              >
+                {multiplexContent}
+              </div>
+
+              {(keepIdeMounted || globalMode === 'ide') && (
+                <div
+                  aria-hidden={globalMode !== 'ide'}
+                  className={`absolute inset-0 min-h-0 overflow-hidden transition-opacity duration-150 ${
+                    globalMode === 'ide' ? 'opacity-100' : 'pointer-events-none opacity-0'
+                  }`}
+                >
+                  {ideContent}
+                </div>
+              )}
             </div>
 
             {/* ---- STATUS BAR ---- */}

@@ -16,35 +16,34 @@ import {
 } from 'lucide-react'
 
 import type { ProjectNode, ProjectState, SessionWorkspaceStrategy } from '@shared/types'
+import {
+  buildSidebarTree,
+  collectAutoExpandedPaths,
+  type SelectedFileEntry,
+  type SidebarTreeNode,
+  type WorkspaceOverlayFile
+} from '../workspace-overlay'
 
 interface SidebarProps {
   project: ProjectState
   refreshing: boolean
   collapsed: boolean
   diffBadges: Record<string, string[]>
+  overlayFiles: WorkspaceOverlayFile[]
   defaultSessionStrategy: SessionWorkspaceStrategy
   onOpenProject: () => void
   onRefreshProject: () => void
   onChangeDefaultSessionStrategy: (strategy: SessionWorkspaceStrategy) => void
   onToggleCollapse: () => void
-  onFileSelect: (path: string) => void
+  onFileSelect: (file: SelectedFileEntry) => void
   globalMode: 'multiplex' | 'ide'
   onToggleGlobalMode: (mode: 'multiplex' | 'ide') => void
 }
 
 interface FileContextMenuState {
-  node: ProjectNode
+  node: SidebarTreeNode
   x: number
   y: number
-}
-
-function initialExpandedPaths(nodes: ProjectNode[]): Set<string> {
-  return new Set(
-    nodes
-      .filter((node) => node.kind === 'directory')
-      .slice(0, 6)
-      .map((node) => node.path)
-  )
 }
 
 function fileIcon(name: string): JSX.Element {
@@ -83,13 +82,13 @@ function TreeNode({
   onFileSelect,
   onFileContextMenu
 }: {
-  node: ProjectNode
+  node: SidebarTreeNode
   depth: number
   expandedPaths: Set<string>
   diffBadges: Record<string, string[]>
   toggle: (path: string) => void
-  onFileSelect: (path: string) => void
-  onFileContextMenu: (event: MouseEvent<HTMLButtonElement>, node: ProjectNode) => void
+  onFileSelect: (file: SelectedFileEntry) => void
+  onFileContextMenu: (event: MouseEvent<HTMLButtonElement>, node: SidebarTreeNode) => void
 }): JSX.Element {
   const isDirectory = node.kind === 'directory'
   const expanded = expandedPaths.has(node.path)
@@ -109,7 +108,10 @@ function TreeNode({
           if (isDirectory) {
             toggle(node.path)
           } else {
-            onFileSelect(node.path)
+            onFileSelect({
+              projectPath: node.path,
+              workspacePath: node.targetPath !== node.path ? node.targetPath : undefined
+            })
           }
         }}
         onContextMenu={(event) => {
@@ -170,6 +172,7 @@ export function Sidebar({
   refreshing,
   collapsed,
   diffBadges,
+  overlayFiles,
   defaultSessionStrategy,
   onOpenProject,
   onRefreshProject,
@@ -181,10 +184,25 @@ export function Sidebar({
 }: SidebarProps): JSX.Element {
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null)
+  const displayTree = buildSidebarTree(project.path, project.tree, overlayFiles)
+  const autoExpandedPaths = collectAutoExpandedPaths(project.path, project.tree, overlayFiles)
+  const overlaySignature = overlayFiles.map((file) => file.projectPath).sort().join('|')
 
   useEffect(() => {
-    setExpandedPaths(initialExpandedPaths(project.tree))
-  }, [project.path, project.tree])
+    setExpandedPaths(autoExpandedPaths)
+  }, [project.path])
+
+  useEffect(() => {
+    if (autoExpandedPaths.size === 0) {
+      return
+    }
+
+    setExpandedPaths((current) => {
+      const next = new Set(current)
+      autoExpandedPaths.forEach((pathValue) => next.add(pathValue))
+      return next
+    })
+  }, [project.path, overlaySignature])
 
   useEffect(() => {
     function closeContextMenu(): void {
@@ -220,7 +238,7 @@ export function Sidebar({
     })
   }
 
-  function handleFileContextMenu(event: MouseEvent<HTMLButtonElement>, node: ProjectNode): void {
+  function handleFileContextMenu(event: MouseEvent<HTMLButtonElement>, node: SidebarTreeNode): void {
     event.preventDefault()
     event.stopPropagation()
 
@@ -396,7 +414,7 @@ export function Sidebar({
 
         <div className="flex items-center justify-between animate-in fade-in slide-in-from-left-4 duration-500 ease-out delay-100">
           <div className="text-xs font-medium uppercase tracking-[0.24em] text-sentinel-mist">Project Tree</div>
-          {project.tree.length > 0 && (
+          {displayTree.length > 0 && (
             <div className="border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] uppercase tracking-[0.2em] text-sentinel-mist">
               live diff badges
             </div>
@@ -405,13 +423,13 @@ export function Sidebar({
       </div>
 
       <div className="mt-5 min-h-0 flex-1 overflow-auto pr-1 animate-in fade-in slide-in-from-left-2 duration-500 ease-out delay-150">
-        {project.tree.length === 0 ? (
+        {displayTree.length === 0 ? (
           <div className="border border-dashed border-white/10 bg-white/[0.03] p-4 text-sm leading-6 text-sentinel-mist">
             Select a project folder to browse files and start sandbox or worktree-backed agent sessions.
           </div>
         ) : (
           <div className="space-y-1">
-            {project.tree.map((node) => (
+            {displayTree.map((node) => (
               <TreeNode
                 key={node.path}
                 depth={0}
@@ -435,7 +453,7 @@ export function Sidebar({
           <button
             className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-white transition hover:bg-white/[0.06]"
             onClick={() => {
-              void revealInExplorer(contextMenu.node.path)
+              void revealInExplorer(contextMenu.node.targetPath)
             }}
             type="button"
           >
@@ -445,7 +463,7 @@ export function Sidebar({
           <button
             className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-white transition hover:bg-white/[0.06]"
             onClick={() => {
-              void openInSystemEditor(contextMenu.node.path)
+              void openInSystemEditor(contextMenu.node.targetPath)
             }}
             type="button"
           >

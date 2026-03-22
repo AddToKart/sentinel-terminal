@@ -102,6 +102,10 @@ function ensureSessionBridge(): void {
     return
   }
 
+  if (typeof window === 'undefined' || typeof window.sentinel === 'undefined') {
+    return
+  }
+
   sessionBridgeStarted = true
   window.sentinel.onSessionOutput((event: SessionOutputEvent) => {
     store.push(event.sessionId, event.data)
@@ -110,6 +114,10 @@ function ensureSessionBridge(): void {
 
 function ensureIdeBridge(): void {
   if (ideBridgeStarted) {
+    return
+  }
+
+  if (typeof window === 'undefined' || typeof window.sentinel === 'undefined') {
     return
   }
 

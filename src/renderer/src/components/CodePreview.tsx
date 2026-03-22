@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Code2, Diff, FileCode2, Save, X } from 'lucide-react'
 import type { IdeTerminalState } from '@shared/types'
+import type { SelectedFileEntry } from '../workspace-overlay'
 
 interface CodePreviewProps {
-  filePath: string | null
+  selectedFile: SelectedFileEntry | null
   projectPath: string | undefined
   ideTerminalState: IdeTerminalState
   onClose: () => void
@@ -39,7 +40,7 @@ function joinWorkspacePath(workspacePath: string, relativePath: string): string 
   return `${workspacePath.replace(/[\/\\]$/, '')}\\${normalizedRelativePath}`
 }
 
-export function CodePreview({ filePath, projectPath, ideTerminalState, onClose }: CodePreviewProps): JSX.Element {
+export function CodePreview({ selectedFile, projectPath, ideTerminalState, onClose }: CodePreviewProps): JSX.Element {
   const [activeTab, setActiveTab] = useState<ViewTab>('edit')
   const [editContent, setEditContent] = useState('')
   const [originalContent, setOriginalContent] = useState('')
@@ -48,10 +49,12 @@ export function CodePreview({ filePath, projectPath, ideTerminalState, onClose }
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
+  const filePath = selectedFile?.projectPath ?? null
   const relativePath = filePath && projectPath ? relativeProjectPath(filePath, projectPath) : null
-  const workspaceFilePath = ideTerminalState.workspacePath && relativePath
-    ? joinWorkspacePath(ideTerminalState.workspacePath, relativePath)
-    : null
+  const workspaceFilePath = selectedFile?.workspacePath
+    ?? (ideTerminalState.workspacePath && relativePath
+      ? joinWorkspacePath(ideTerminalState.workspacePath, relativePath)
+      : null)
 
   useEffect(() => {
     if (!filePath || !workspaceFilePath) return

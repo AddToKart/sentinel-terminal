@@ -35,6 +35,7 @@ export interface RawProcessTreeSnapshot {
 export interface SessionRecord {
   summary: SessionSummary
   terminal: IPty
+  terminalSize: { cols: number; rows: number }
   closePromise: Promise<void>
   resolveClosed: () => void
   closeRequested: boolean
@@ -49,6 +50,7 @@ export interface SessionRecord {
 export interface IdeTerminalRecord {
   state: IdeTerminalState
   terminal: IPty
+  terminalSize: { cols: number; rows: number }
   closePromise: Promise<void>
   resolveClosed: () => void
   closeRequested: boolean

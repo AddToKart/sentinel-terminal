@@ -77,6 +77,7 @@ export function SessionTile({
   const writeFrameRef = useRef<number | null>(null)
   const writeInFlightRef = useRef(false)
   const fitFrameRef = useRef<number | null>(null)
+  const fitTimerRef = useRef<number | null>(null)
   const focusFrameRef = useRef<number | null>(null)
   const lastGeometryRef = useRef({ width: 0, height: 0, cols: 0, rows: 0 })
 
@@ -126,54 +127,64 @@ export function SessionTile({
     scheduleWriteFlush()
   }
 
-  function scheduleTerminalFit(): void {
-    if (fitFrameRef.current !== null) {
+  function performTerminalFit(): void {
+    if (viewModeRef.current !== 'terminal') {
       return
     }
 
-    fitFrameRef.current = requestAnimationFrame(() => {
-      fitFrameRef.current = null
+    const host = terminalHostRef.current
+    const terminal = terminalRef.current
+    const fitAddon = fitAddonRef.current
 
-      if (viewModeRef.current !== 'terminal') {
-        return
-      }
+    if (!host || !terminal || !fitAddon) {
+      return
+    }
 
-      const host = terminalHostRef.current
-      const terminal = terminalRef.current
-      const fitAddon = fitAddonRef.current
+    const width = host.clientWidth
+    const height = host.clientHeight
+    if (width < 8 || height < 8) {
+      return
+    }
 
-      if (!host || !terminal || !fitAddon) {
-        return
-      }
+    fitAddon.fit()
 
-      const width = host.clientWidth
-      const height = host.clientHeight
-      if (width < 8 || height < 8) {
-        return
-      }
+    const cols = terminal.cols
+    const rows = terminal.rows
+    if (cols <= 0 || rows <= 0) {
+      return
+    }
 
-      fitAddon.fit()
-      terminal.refresh(0, Math.max(terminal.rows - 1, 0))
+    const lastGeometry = lastGeometryRef.current
+    const hostChanged = lastGeometry.width !== width || lastGeometry.height !== height
+    const cellGeometryChanged = lastGeometry.cols !== cols || lastGeometry.rows !== rows
 
-      const cols = terminal.cols
-      const rows = terminal.rows
-      if (cols <= 0 || rows <= 0) {
-        return
-      }
+    if (!hostChanged && !cellGeometryChanged) {
+      return
+    }
 
-      const lastGeometry = lastGeometryRef.current
-      if (
-        lastGeometry.width === width &&
-        lastGeometry.height === height &&
-        lastGeometry.cols === cols &&
-        lastGeometry.rows === rows
-      ) {
-        return
-      }
-
-      lastGeometryRef.current = { width, height, cols, rows }
+    lastGeometryRef.current = { width, height, cols, rows }
+    if (cellGeometryChanged) {
       void window.sentinel.resizeSession(session.id, cols, rows)
-    })
+    }
+  }
+
+  function scheduleTerminalFit(delay = 120): void {
+    if (fitTimerRef.current !== null) {
+      window.clearTimeout(fitTimerRef.current)
+    }
+
+    fitTimerRef.current = window.setTimeout(() => {
+      fitTimerRef.current = null
+
+      if (fitFrameRef.current !== null) {
+        cancelAnimationFrame(fitFrameRef.current)
+      }
+
+      fitFrameRef.current = requestAnimationFrame(() => {
+        fitFrameRef.current = null
+        performTerminalFit()
+      })
+    }, delay)
   }
 
   function scheduleTerminalFocus(): void {
@@ -261,12 +272,12 @@ export function SessionTile({
     })
 
     const observer = new ResizeObserver(() => {
-      scheduleTerminalFit()
+      scheduleTerminalFit(140)
     })
     observer.observe(terminalHostRef.current)
 
     requestAnimationFrame(() => {
-      scheduleTerminalFit()
+      scheduleTerminalFit(0)
       scheduleTerminalFocus()
     })
 
@@ -285,6 +296,10 @@ export function SessionTile({
         cancelAnimationFrame(fitFrameRef.current)
         fitFrameRef.current = null
       }
+      if (fitTimerRef.current !== null) {
+        window.clearTimeout(fitTimerRef.current)
+        fitTimerRef.current = null
+      }
       if (focusFrameRef.current !== null) {
         cancelAnimationFrame(focusFrameRef.current)
         focusFrameRef.current = null
@@ -301,11 +316,18 @@ export function SessionTile({
   // Re-fit on nonce/mode change
   useEffect(() => {
     if (viewMode !== 'terminal' || !terminalRef.current || !fitAddonRef.current) return
+    scheduleTerminalFit(60)
+  }, [session.id, fitNonce, viewMode])
+
+  useEffect(() => {
+    if (viewMode !== 'terminal') {
+      return
+    }
+
     requestAnimationFrame(() => {
-      scheduleTerminalFit()
       scheduleTerminalFocus()
     })
-  }, [session.id, fitNonce, viewMode])
+  }, [viewMode])
 
   // Session exit message
   useEffect(() => {

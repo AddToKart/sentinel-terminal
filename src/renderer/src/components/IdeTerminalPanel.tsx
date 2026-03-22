@@ -38,6 +38,7 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
   const writeFrameRef = useRef<number | null>(null)
   const writeInFlightRef = useRef(false)
   const fitFrameRef = useRef<number | null>(null)
+  const fitTimerRef = useRef<number | null>(null)
   const focusFrameRef = useRef<number | null>(null)
   const lastGeometryRef = useRef({ width: 0, height: 0, cols: 0, rows: 0 })
   const lastProjectPathRef = useRef<string | undefined>(projectPath)
@@ -82,50 +83,60 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
     scheduleWriteFlush()
   }
 
-  function scheduleTerminalFit(): void {
-    if (fitFrameRef.current !== null) {
+  function performTerminalFit(): void {
+    const host = terminalHostRef.current
+    const terminal = terminalRef.current
+    const fitAddon = fitAddonRef.current
+
+    if (!host || !terminal || !fitAddon) {
       return
     }
 
-    fitFrameRef.current = requestAnimationFrame(() => {
-      fitFrameRef.current = null
+    const width = host.clientWidth
+    const height = host.clientHeight
+    if (width < 8 || height < 8) {
+      return
+    }
 
-      const host = terminalHostRef.current
-      const terminal = terminalRef.current
-      const fitAddon = fitAddonRef.current
+    fitAddon.fit()
 
-      if (!host || !terminal || !fitAddon) {
-        return
-      }
+    const cols = terminal.cols
+    const rows = terminal.rows
+    if (cols <= 0 || rows <= 0) {
+      return
+    }
 
-      const width = host.clientWidth
-      const height = host.clientHeight
-      if (width < 8 || height < 8) {
-        return
-      }
+    const lastGeometry = lastGeometryRef.current
+    const hostChanged = lastGeometry.width !== width || lastGeometry.height !== height
+    const cellGeometryChanged = lastGeometry.cols !== cols || lastGeometry.rows !== rows
 
-      fitAddon.fit()
-      terminal.refresh(0, Math.max(terminal.rows - 1, 0))
+    if (!hostChanged && !cellGeometryChanged) {
+      return
+    }
 
-      const cols = terminal.cols
-      const rows = terminal.rows
-      if (cols <= 0 || rows <= 0) {
-        return
-      }
-
-      const lastGeometry = lastGeometryRef.current
-      if (
-        lastGeometry.width === width &&
-        lastGeometry.height === height &&
-        lastGeometry.cols === cols &&
-        lastGeometry.rows === rows
-      ) {
-        return
-      }
-
-      lastGeometryRef.current = { width, height, cols, rows }
+    lastGeometryRef.current = { width, height, cols, rows }
+    if (cellGeometryChanged) {
       void window.sentinel.resizeIdeTerminal(cols, rows)
-    })
+    }
+  }
+
+  function scheduleTerminalFit(delay = 120): void {
+    if (fitTimerRef.current !== null) {
+      window.clearTimeout(fitTimerRef.current)
+    }
+
+    fitTimerRef.current = window.setTimeout(() => {
+      fitTimerRef.current = null
+
+      if (fitFrameRef.current !== null) {
+        cancelAnimationFrame(fitFrameRef.current)
+      }
+
+      fitFrameRef.current = requestAnimationFrame(() => {
+        fitFrameRef.current = null
+        performTerminalFit()
+      })
+    }, delay)
   }
 
   function scheduleTerminalFocus(): void {
@@ -188,7 +199,7 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
       const state = await window.sentinel.ensureIdeTerminal()
       setTerminalState(state)
       requestAnimationFrame(() => {
-        scheduleTerminalFit()
+        scheduleTerminalFit(0)
         scheduleTerminalFocus()
       })
     } finally {
@@ -232,7 +243,7 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
     })
 
     const observer = new ResizeObserver(() => {
-      scheduleTerminalFit()
+      scheduleTerminalFit(140)
     })
     observer.observe(terminalHostRef.current)
 
@@ -252,6 +263,10 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
       if (fitFrameRef.current !== null) {
         cancelAnimationFrame(fitFrameRef.current)
         fitFrameRef.current = null
+      }
+      if (fitTimerRef.current !== null) {
+        window.clearTimeout(fitTimerRef.current)
+        fitTimerRef.current = null
       }
       if (focusFrameRef.current !== null) {
         cancelAnimationFrame(focusFrameRef.current)
@@ -278,10 +293,7 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
   }, [projectPath])
 
   useEffect(() => {
-    requestAnimationFrame(() => {
-      scheduleTerminalFit()
-      scheduleTerminalFocus()
-    })
+    scheduleTerminalFit(60)
   }, [fitNonce])
 
   useEffect(() => {

@@ -277,6 +277,10 @@ export class SessionManager extends EventEmitter {
     const record: SessionRecord = {
       summary,
       terminal,
+      terminalSize: {
+        cols: input.cols ?? 120,
+        rows: input.rows ?? 32
+      },
       closePromise,
       resolveClosed,
       closeRequested: false,
@@ -377,7 +381,16 @@ export class SessionManager extends EventEmitter {
       await this.ensureIdeTerminal()
     }
 
-    this.ideTerminalRecord?.terminal.resize(cols, rows)
+    if (!this.ideTerminalRecord) {
+      return
+    }
+
+    if (this.ideTerminalRecord.terminalSize.cols === cols && this.ideTerminalRecord.terminalSize.rows === rows) {
+      return
+    }
+
+    this.ideTerminalRecord.terminalSize = { cols, rows }
+    this.ideTerminalRecord.terminal.resize(cols, rows)
   }
 
   async writeIdeFile(relativePath: string, content: string): Promise<void> {
@@ -655,6 +668,11 @@ export class SessionManager extends EventEmitter {
       return
     }
 
+    if (record.terminalSize.cols === cols && record.terminalSize.rows === rows) {
+      return
+    }
+
+    record.terminalSize = { cols, rows }
     record.terminal.resize(cols, rows)
   }
 
@@ -1323,6 +1341,10 @@ export class SessionManager extends EventEmitter {
         modifiedPaths
       },
       terminal,
+      terminalSize: {
+        cols: 120,
+        rows: 28
+      },
       closePromise,
       resolveClosed,
       closeRequested: false
