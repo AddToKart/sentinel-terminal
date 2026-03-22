@@ -14,6 +14,7 @@ interface AgentDashboardProps {
   onToggleMaximize: (sessionId: string) => void
   maximizedSessionId: string | null
   fitNonce: number
+  windowsBuildNumber?: number
 }
 
 function getColumnCount(sessionCount: number): number {
@@ -73,7 +74,8 @@ export function AgentDashboard({
   onClose,
   onToggleMaximize,
   maximizedSessionId,
-  fitNonce
+  fitNonce,
+  windowsBuildNumber
 }: AgentDashboardProps): JSX.Element {
   const [layoutMode, setLayoutMode] = useState<'grid' | 'master-stack'>('master-stack')
 
@@ -101,6 +103,7 @@ export function AgentDashboard({
             applySession={() => window.sentinel.applySession(session.id)}
             commitSession={(msg) => window.sentinel.commitSession(session.id, msg)}
             discardSessionChanges={() => window.sentinel.discardSessionChanges(session.id)}
+            windowsBuildNumber={windowsBuildNumber}
           />
         </div>
       </div>
@@ -159,6 +162,7 @@ export function AgentDashboard({
                 applySession={() => window.sentinel.applySession(masterSession.id)}
                 commitSession={(msg) => window.sentinel.commitSession(masterSession.id, msg)}
                 discardSessionChanges={() => window.sentinel.discardSessionChanges(masterSession.id)}
+                windowsBuildNumber={windowsBuildNumber}
               />
             </div>
           </Panel>
@@ -185,6 +189,7 @@ export function AgentDashboard({
                         applySession={() => window.sentinel.applySession(session.id)}
                         commitSession={(msg) => window.sentinel.commitSession(session.id, msg)}
                         discardSessionChanges={() => window.sentinel.discardSessionChanges(session.id)}
+                        windowsBuildNumber={windowsBuildNumber}
                       />
                     </div>
                   </Panel>
@@ -242,6 +247,7 @@ export function AgentDashboard({
                             applySession={() => window.sentinel.applySession(session.id)}
                             commitSession={(msg) => window.sentinel.commitSession(session.id, msg)}
                             discardSessionChanges={() => window.sentinel.discardSessionChanges(session.id)}
+                            windowsBuildNumber={windowsBuildNumber}
                           />
                         </div>
                       </Panel>

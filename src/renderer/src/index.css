@@ -117,10 +117,6 @@ textarea {
   z-index: -1 !important;
 }
 
-.xterm .xterm-screen canvas {
-  filter: saturate(1.02);
-}
-
 .terminal-host,
 .terminal-host > .xterm {
   height: 100%;

@@ -133,6 +133,7 @@ export interface BootstrapPayload {
   diffs: SessionDiffUpdate[]
   preferences: WorkspacePreferences
   ideTerminal: IdeTerminalState
+  windowsBuildNumber?: number
 }
 
 export interface CreateSessionInput {

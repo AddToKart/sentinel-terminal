@@ -4,12 +4,14 @@ import { Terminal } from '@xterm/xterm'
 import { CheckCheck, LoaderCircle, RefreshCw, RotateCcw, TerminalSquare } from 'lucide-react'
 
 import type { IdeTerminalState } from '@shared/types'
+import { createTerminalOptions, installTerminalMaintenance } from '../terminal-config'
 import { clearIdeTerminalOutput, subscribeToIdeTerminalOutput } from '../terminal-stream'
 
 interface IdeTerminalPanelProps {
   fitNonce: number
   projectPath?: string
   terminalState: IdeTerminalState
+  windowsBuildNumber?: number
 }
 
 function createIdleState(projectPath?: string): IdeTerminalState {
@@ -30,7 +32,12 @@ function describeState(state: IdeTerminalState): string {
   return 'ready'
 }
 
-export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externalState }: IdeTerminalPanelProps): JSX.Element {
+export function IdeTerminalPanel({
+  fitNonce,
+  projectPath,
+  terminalState: externalState,
+  windowsBuildNumber
+}: IdeTerminalPanelProps): JSX.Element {
   const terminalHostRef = useRef<HTMLDivElement | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -212,19 +219,7 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
       return
     }
 
-    const terminal = new Terminal({
-      allowTransparency: true,
-      convertEol: false,
-      cursorBlink: true,
-      customGlyphs: true,
-      fontFamily: 'JetBrains Mono, Cascadia Code, Consolas, monospace',
-      fontSize: 13,
-      lineHeight: 1.2,
-      scrollback: 6000,
-      smoothScrollDuration: 0,
-      windowsPty: { backend: 'conpty' },
-      theme: { background: '#060a0f', black: '#060a0f' }
-    })
+    const terminal = new Terminal(createTerminalOptions(windowsBuildNumber))
 
     const fitAddon = new FitAddon()
     terminal.loadAddon(fitAddon)
@@ -247,6 +242,8 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
     })
     observer.observe(terminalHostRef.current)
 
+    const disposeMaintenance = installTerminalMaintenance(terminal, () => true)
+
     terminalRef.current = terminal
     fitAddonRef.current = fitAddon
 
@@ -254,6 +251,7 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
 
     return () => {
       observer.disconnect()
+      disposeMaintenance()
       outputCleanup()
       inputDisposable.dispose()
       if (writeFrameRef.current !== null) {
@@ -279,7 +277,7 @@ export function IdeTerminalPanel({ fitNonce, projectPath, terminalState: externa
       terminalRef.current = null
       fitAddonRef.current = null
     }
-  }, [])
+  }, [windowsBuildNumber])
 
   useEffect(() => {
     setTerminalState(externalState)

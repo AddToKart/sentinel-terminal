@@ -80,6 +80,7 @@ export default function App(): JSX.Element {
   const [refreshingProject, setRefreshingProject] = useState(false)
   const [defaultSessionStrategy, setDefaultSessionStrategy] = useState<SessionWorkspaceStrategy>('sandbox-copy')
   const [ideTerminalState, setIdeTerminalState] = useState<IdeTerminalState>(defaultIdeTerminalState())
+  const [windowsBuildNumber, setWindowsBuildNumber] = useState<number | undefined>(undefined)
 
   const sidebarPanelRef = useRef<ImperativePanelHandle | null>(null)
   const shellViewportRef = useRef<HTMLDivElement | null>(null)
@@ -151,6 +152,7 @@ export default function App(): JSX.Element {
         setActivityLog(payload.activityLog)
         setDefaultSessionStrategy(payload.preferences.defaultSessionStrategy)
         setIdeTerminalState(payload.ideTerminal)
+        setWindowsBuildNumber(payload.windowsBuildNumber)
 
         const histories: Record<string, SessionCommandEntry[]> = {}
         for (const u of payload.histories) histories[u.sessionId] = u.entries
@@ -362,6 +364,7 @@ export default function App(): JSX.Element {
         onClose={handleCloseSession}
         onToggleMaximize={(id) => setMaximizedSessionId((c) => c === id ? null : id)}
         sessions={sessions}
+        windowsBuildNumber={windowsBuildNumber}
       />
     </Suspense>
   )
@@ -378,7 +381,12 @@ export default function App(): JSX.Element {
       </Panel>
       <PanelResizeHandle className="h-[3px] bg-transparent hover:bg-sentinel-accent/20 active:bg-sentinel-accent/40 transition-colors cursor-row-resize" />
       <Panel defaultSize={35} minSize={10} className="min-h-0">
-        <IdeTerminalPanel fitNonce={fitNonce} projectPath={project.path} terminalState={ideTerminalState} />
+        <IdeTerminalPanel
+          fitNonce={fitNonce}
+          projectPath={project.path}
+          terminalState={ideTerminalState}
+          windowsBuildNumber={windowsBuildNumber}
+        />
       </Panel>
     </PanelGroup>
   )

@@ -69,11 +69,24 @@ function resolveWorkspaceFilePath(workspacePath: string, relativePath: string): 
   return resolvedPath
 }
 
+function parseWindowsBuildNumber(): number | undefined {
+  if (process.platform !== 'win32') {
+    return undefined
+  }
+
+  const releaseParts = os.release().split('.')
+  const buildPart = releaseParts[releaseParts.length - 1]
+  const parsed = Number.parseInt(buildPart ?? '', 10)
+
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
+
 export class SessionManager extends EventEmitter {
   private readonly sessionRecords = new Map<string, SessionRecord>()
   private readonly pidRegistry = new Map<string, Set<number>>()
   private readonly metricsTimer: NodeJS.Timeout
   private readonly activityLog: ActivityLogEntry[] = []
+  private readonly windowsBuildNumber = parseWindowsBuildNumber()
   private ideTerminalRecord: IdeTerminalRecord | null = null
   private ideTerminalState: IdeTerminalState = {
     status: 'idle',
@@ -136,7 +149,8 @@ export class SessionManager extends EventEmitter {
       histories: this.listSessionHistories(),
       diffs: this.listSessionDiffs(),
       preferences: structuredClone(this.preferences),
-      ideTerminal: structuredClone(this.ideTerminalState)
+      ideTerminal: structuredClone(this.ideTerminalState),
+      windowsBuildNumber: this.windowsBuildNumber
     }
   }
 

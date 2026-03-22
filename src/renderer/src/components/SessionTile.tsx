@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 
 import type { SessionApplyResult, SessionCommandEntry, SessionSummary } from '@shared/types'
+import { createTerminalOptions, installTerminalMaintenance } from '../terminal-config'
 import { subscribeToSessionOutput } from '../terminal-stream'
 
 interface SessionTileProps {
@@ -34,6 +35,7 @@ interface SessionTileProps {
   discardSessionChanges: () => Promise<void>
   isMaximized: boolean
   fitNonce: number
+  windowsBuildNumber?: number
 }
 
 function statusColor(status: SessionSummary['status']): string {
@@ -66,7 +68,8 @@ export function SessionTile({
   commitSession,
   discardSessionChanges,
   isMaximized,
-  fitNonce
+  fitNonce,
+  windowsBuildNumber
 }: SessionTileProps): JSX.Element {
   const terminalHostRef = useRef<HTMLDivElement | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
@@ -237,19 +240,7 @@ export function SessionTile({
   useEffect(() => {
     if (!terminalHostRef.current) return
 
-    const terminal = new Terminal({
-      allowTransparency: true,
-      convertEol: false,
-      cursorBlink: true,
-      customGlyphs: true,
-      fontFamily: 'JetBrains Mono, Cascadia Code, Consolas, monospace',
-      fontSize: 13,
-      lineHeight: 1.2,
-      scrollback: 6000,
-      smoothScrollDuration: 0,
-      windowsPty: { backend: 'conpty' },
-      theme: { background: '#060a0f', black: '#060a0f' }
-    })
+    const terminal = new Terminal(createTerminalOptions(windowsBuildNumber))
 
     const fitAddon = new FitAddon()
     terminal.loadAddon(fitAddon)
@@ -276,6 +267,11 @@ export function SessionTile({
     })
     observer.observe(terminalHostRef.current)
 
+    const disposeMaintenance = installTerminalMaintenance(
+      terminal,
+      () => viewModeRef.current === 'terminal'
+    )
+
     requestAnimationFrame(() => {
       scheduleTerminalFit(0)
       scheduleTerminalFocus()
@@ -286,6 +282,7 @@ export function SessionTile({
 
     return () => {
       observer.disconnect()
+      disposeMaintenance()
       outputCleanup()
       inputDisposable.dispose()
       if (writeFrameRef.current !== null) {
@@ -311,7 +308,7 @@ export function SessionTile({
       terminalRef.current = null
       fitAddonRef.current = null
     }
-  }, [session.id])
+  }, [session.id, windowsBuildNumber])
 
   // Re-fit on nonce/mode change
   useEffect(() => {
