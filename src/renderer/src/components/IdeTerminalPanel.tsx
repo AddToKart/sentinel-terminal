@@ -4,7 +4,12 @@ import { Terminal } from '@xterm/xterm'
 import { CheckCheck, LoaderCircle, RefreshCw, RotateCcw, TerminalSquare } from 'lucide-react'
 
 import type { IdeTerminalState } from '@shared/types'
-import { createTerminalOptions, installTerminalMaintenance, refreshTerminalSurface } from '../terminal-config'
+import {
+  createTerminalOptions,
+  getTerminalRecoveryIntervalMs,
+  installTerminalMaintenance,
+  refreshTerminalSurface
+} from '../terminal-config'
 import { clearIdeTerminalOutput, subscribeToIdeTerminalOutput } from '../terminal-stream'
 
 interface IdeTerminalPanelProps {
@@ -47,6 +52,7 @@ export function IdeTerminalPanel({
   const fitFrameRef = useRef<number | null>(null)
   const fitTimerRef = useRef<number | null>(null)
   const focusFrameRef = useRef<number | null>(null)
+  const recoveryTimerRef = useRef<number | null>(null)
   const lastGeometryRef = useRef({ width: 0, height: 0, cols: 0, rows: 0 })
   const lastProjectPathRef = useRef<string | undefined>(projectPath)
   const hasWrittenExitRef = useRef(false)
@@ -189,6 +195,16 @@ export function IdeTerminalPanel({
     terminal.scrollLines(lines)
   }
 
+  function healTerminalDisplay(): void {
+    lastGeometryRef.current = { width: 0, height: 0, cols: 0, rows: 0 }
+    scheduleTerminalFit(0)
+    requestAnimationFrame(() => {
+      if (terminalRef.current) {
+        refreshTerminalSurface(terminalRef.current)
+      }
+    })
+  }
+
   async function ensureTerminal(resetOutput = false): Promise<void> {
     if (!projectPath) {
       setTerminalState(createIdleState())
@@ -226,9 +242,6 @@ export function IdeTerminalPanel({
     terminal.loadAddon(fitAddon)
     terminal.open(terminalHostRef.current)
     configureTerminalDom(terminal)
-    terminal.writeln('\x1b[38;2;140;245;221mIDE WORKSPACE SHELL\x1b[0m')
-    terminal.writeln('\x1b[38;2;143;165;184mIDE mode runs in its own isolated sandbox workspace.\x1b[0m')
-    terminal.writeln('')
 
     const outputCleanup = subscribeToIdeTerminalOutput((data) => {
       enqueueOutput(data)
@@ -297,6 +310,28 @@ export function IdeTerminalPanel({
       if (terminalRef.current) refreshTerminalSurface(terminalRef.current)
     })
   }, [fitNonce])
+
+  useEffect(() => {
+    if (terminalState.status !== 'ready') {
+      if (recoveryTimerRef.current !== null) {
+        window.clearInterval(recoveryTimerRef.current)
+        recoveryTimerRef.current = null
+      }
+      return
+    }
+
+    const intervalMs = getTerminalRecoveryIntervalMs('ide-terminal')
+    recoveryTimerRef.current = window.setInterval(() => {
+      healTerminalDisplay()
+    }, intervalMs)
+
+    return () => {
+      if (recoveryTimerRef.current !== null) {
+        window.clearInterval(recoveryTimerRef.current)
+        recoveryTimerRef.current = null
+      }
+    }
+  }, [terminalState.status])
 
   useEffect(() => {
     if (terminalState.status !== 'closed' && terminalState.status !== 'error') {
@@ -388,8 +423,15 @@ export function IdeTerminalPanel({
           </button>
           <button
             className="inline-flex h-5 w-5 items-center justify-center text-sentinel-mist/60 transition hover:text-white"
-            onClick={() => void ensureTerminal(true)}
-            title="Reconnect shell"
+            onClick={() => {
+              if (terminalState.status === 'ready') {
+                healTerminalDisplay()
+                return
+              }
+
+              void ensureTerminal(true)
+            }}
+            title={terminalState.status === 'ready' ? 'Recover display' : 'Reconnect shell'}
             type="button"
           >
             <RefreshCw className="h-3 w-3" />

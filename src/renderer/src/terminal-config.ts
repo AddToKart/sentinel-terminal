@@ -1,6 +1,7 @@
 import { Terminal } from '@xterm/xterm'
 
 type TerminalOptions = ConstructorParameters<typeof Terminal>[0]
+const SURFACE_REFRESH_INTERVAL_MS = 60_000
 
 export function createTerminalOptions(windowsBuildNumber?: number): TerminalOptions {
   return {
@@ -10,7 +11,7 @@ export function createTerminalOptions(windowsBuildNumber?: number): TerminalOpti
     customGlyphs: false,
     fontFamily: 'JetBrains Mono, Cascadia Code, Consolas, monospace',
     fontSize: 13,
-    lineHeight: 1.2,
+    lineHeight: 1,
     scrollback: 2000,
     smoothScrollDuration: 0,
     theme: {
@@ -22,6 +23,16 @@ export function createTerminalOptions(windowsBuildNumber?: number): TerminalOpti
       buildNumber: windowsBuildNumber
     }
   }
+}
+
+export function getTerminalRecoveryIntervalMs(seed: string): number {
+  let hash = 0
+
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = (hash * 31 + seed.charCodeAt(index)) >>> 0
+  }
+
+  return 18_000 + (hash % 8_000)
 }
 
 export function refreshTerminalSurface(terminal: Terminal): void {
@@ -45,7 +56,7 @@ export function installTerminalMaintenance(
 
   const intervalId = window.setInterval(() => {
     maybeRefresh()
-  }, 3_000)
+  }, SURFACE_REFRESH_INTERVAL_MS)
 
   const handleWindowFocus = (): void => {
     requestAnimationFrame(() => {

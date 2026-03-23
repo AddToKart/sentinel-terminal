@@ -13,7 +13,7 @@ interface OutputStore {
   subscribe: (key: string, listener: OutputListener, replay?: boolean) => () => void
 }
 
-const MAX_BUFFER_LENGTH = 250_000
+const MAX_BUFFER_LENGTH = 500_000
 const IDE_TERMINAL_KEY = 'ide-terminal'
 
 function createOutputStore(): OutputStore {

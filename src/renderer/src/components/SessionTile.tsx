@@ -13,6 +13,7 @@ import {
   Maximize2,
   MemoryStick,
   Minimize2,
+  RefreshCw,
   Search,
   Sparkles,
   TerminalSquare,
@@ -21,7 +22,12 @@ import {
 } from 'lucide-react'
 
 import type { SessionApplyResult, SessionCommandEntry, SessionSummary } from '@shared/types'
-import { createTerminalOptions, installTerminalMaintenance, refreshTerminalSurface } from '../terminal-config'
+import {
+  createTerminalOptions,
+  getTerminalRecoveryIntervalMs,
+  installTerminalMaintenance,
+  refreshTerminalSurface
+} from '../terminal-config'
 import { subscribeToSessionOutput } from '../terminal-stream'
 
 interface SessionTileProps {
@@ -82,6 +88,7 @@ export function SessionTile({
   const fitFrameRef = useRef<number | null>(null)
   const fitTimerRef = useRef<number | null>(null)
   const focusFrameRef = useRef<number | null>(null)
+  const recoveryTimerRef = useRef<number | null>(null)
   const lastGeometryRef = useRef({ width: 0, height: 0, cols: 0, rows: 0 })
 
   const [viewMode, setViewMode] = useState<'terminal' | 'history' | 'review'>('terminal')
@@ -237,6 +244,16 @@ export function SessionTile({
     terminal.scrollLines(lines)
   }
 
+  function healTerminalDisplay(): void {
+    lastGeometryRef.current = { width: 0, height: 0, cols: 0, rows: 0 }
+    scheduleTerminalFit(0)
+    requestAnimationFrame(() => {
+      if (terminalRef.current) {
+        refreshTerminalSurface(terminalRef.current)
+      }
+    })
+  }
+
   // Terminal initialization
   useEffect(() => {
     if (!terminalHostRef.current) return
@@ -247,13 +264,6 @@ export function SessionTile({
     terminal.loadAddon(fitAddon)
     terminal.open(terminalHostRef.current)
     configureTerminalDom(terminal)
-    terminal.writeln(`\x1b[38;2;140;245;221m${session.label.toUpperCase()}\x1b[0m`)
-    terminal.writeln(`\x1b[38;2;143;165;184mWorkspace:\x1b[0m ${session.workspaceStrategy}`)
-    if (session.branchName) {
-      terminal.writeln(`\x1b[38;2;143;165;184mBranch:\x1b[0m ${session.branchName}`)
-    }
-    terminal.writeln(`\x1b[38;2;143;165;184mPID:\x1b[0m ${session.pid ?? '--'}`)
-    terminal.writeln('')
 
     const outputCleanup = subscribeToSessionOutput(session.id, (data) => {
       enqueueOutput(data)
@@ -310,6 +320,28 @@ export function SessionTile({
       fitAddonRef.current = null
     }
   }, [session.id, windowsBuildNumber])
+
+  useEffect(() => {
+    if (viewMode !== 'terminal' || session.status !== 'ready') {
+      if (recoveryTimerRef.current !== null) {
+        window.clearInterval(recoveryTimerRef.current)
+        recoveryTimerRef.current = null
+      }
+      return
+    }
+
+    const intervalMs = getTerminalRecoveryIntervalMs(session.id)
+    recoveryTimerRef.current = window.setInterval(() => {
+      healTerminalDisplay()
+    }, intervalMs)
+
+    return () => {
+      if (recoveryTimerRef.current !== null) {
+        window.clearInterval(recoveryTimerRef.current)
+        recoveryTimerRef.current = null
+      }
+    }
+  }, [session.id, session.status, viewMode])
 
   // Re-fit on nonce/mode change
   useEffect(() => {
@@ -439,6 +471,9 @@ export function SessionTile({
           <button className="px-1 text-white/30 hover:text-rose-300 transition disabled:opacity-20" disabled={isClosing || opLoading !== null || modifiedPaths.length === 0} onClick={() => handleOp('discard')} title="Discard"><Trash2 className="h-2.5 w-2.5" /></button>
           <button className="px-1 text-white/30 hover:text-sentinel-glow transition disabled:opacity-20" disabled={isClosing || opLoading !== null || modifiedPaths.length === 0} onClick={() => handleOp('apply')} title={session.workspaceStrategy === 'sandbox-copy' ? 'Apply to Main Project' : 'Merge to Main'}>{session.workspaceStrategy === 'sandbox-copy' ? <CopyCheck className="h-2.5 w-2.5" /> : <GitMerge className="h-2.5 w-2.5" />}</button>
           <div className="mx-1 h-3 w-px bg-white/10" />
+          <button className="px-1 text-white/30 hover:text-sentinel-accent transition disabled:opacity-20" disabled={isClosing} onClick={healTerminalDisplay} title="Recover display">
+            <RefreshCw className="h-2.5 w-2.5" />
+          </button>
           <button className="px-1 text-white/30 hover:text-white transition" onClick={() => onToggleMaximize(session.id)} title={isMaximized ? 'Restore' : 'Maximize'}>
             {isMaximized ? <Minimize2 className="h-2.5 w-2.5" /> : <Maximize2 className="h-2.5 w-2.5" />}
           </button>
